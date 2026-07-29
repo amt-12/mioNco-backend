@@ -1,0 +1,116 @@
+const mongoose = require('mongoose');
+
+const orderItemSchema = new mongoose.Schema({
+    menuItem: {
+        type: mongoose.Schema.ObjectId,
+        ref: 'MenuItem',
+        required: true
+    },
+    variant: {
+        name: String,
+        price: Number
+    },
+    customizations: [{
+        group: String,
+        option: String,
+        price: Number
+    }],
+    quantity: {
+        type: Number,
+        required: true,
+        min: 1
+    },
+    unitPrice: {
+        type: Number,
+        required: true
+    },
+    totalPrice: {
+        type: Number,
+        required: true
+    },
+    notes: {
+        type: String
+    },
+    status: {
+        type: String,
+        enum: ['Pending', 'Preparing', 'Ready', 'Served', 'Cancelled'],
+        default: 'Pending'
+    },
+    servedAt: Date,
+    cancelledAt: Date,
+    cancelledReason: String
+}, { _id: true }); // ensure subdocs have IDs
+
+const orderSchema = new mongoose.Schema({
+    orderId: {
+        type: String,
+        required: true,
+        unique: true
+    },
+    session: {
+        type: mongoose.Schema.ObjectId,
+        ref: 'DiningSession',
+        required: true
+    },
+    table: {
+        type: mongoose.Schema.ObjectId,
+        ref: 'Table'
+    },
+    source: {
+        type: String,
+        enum: ['Table QR', 'Waiter', 'Reception', 'Admin', 'Dine In', 'Dine-In', 'Takeaway', 'Delivery', 'POS'],
+        default: 'Waiter'
+    },
+    waiter: {
+        type: mongoose.Schema.ObjectId,
+        ref: 'User'
+    },
+    items: [orderItemSchema],
+    status: {
+        type: String,
+        enum: ['Draft', 'Pending Acceptance', 'Accepted', 'Preparing', 'Ready to Serve', 'Served', 'Completed', 'Cancelled'],
+        default: 'Pending Acceptance'
+    },
+    priority: {
+        type: String,
+        enum: ['Normal', 'High Priority', 'VIP', 'Urgent', 'Chef Priority'],
+        default: 'Normal'
+    },
+    subtotal: {
+        type: Number,
+        default: 0
+    },
+    tax: {
+        type: Number,
+        default: 0
+    },
+    total: {
+        type: Number,
+        default: 0
+    },
+    customerNotes: {
+        type: String
+    },
+    paymentMethod: {
+        type: String,
+        enum: ['Cash', 'UPI', 'Card', 'Pending'],
+        default: 'Pending'
+    },
+    paymentStatus: {
+        type: String,
+        enum: ['Pending', 'Paid', 'Failed'],
+        default: 'Pending'
+    },
+    paymentDetails: {
+        cashReceived: Number,
+        changeGiven: Number,
+        upiTxnId: String,
+        cardType: String,
+        cardRef: String,
+        paidAt: Date
+    }
+}, {
+    timestamps: true
+});
+
+module.exports = mongoose.model('Order', orderSchema);
