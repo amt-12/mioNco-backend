@@ -95,6 +95,17 @@ io.on('connection', (socket) => {
         socket.leave(`floor_${floorId}`);
     });
 
+    // Table OTP verification handlers between Waiter POS and Air Menu
+    socket.on('send_table_otp', (data) => {
+        console.log('Sending table OTP to Air Menu:', data);
+        io.emit('table_otp_prompt', data);
+    });
+
+    socket.on('verify_table_otp', (data) => {
+        console.log('Verifying table OTP:', data);
+        io.emit('table_otp_verified', data);
+    });
+
     socket.on('disconnect', () => {
         console.log(`Socket disconnected: ${socket.id}`);
     });

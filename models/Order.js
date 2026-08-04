@@ -58,7 +58,7 @@ const orderSchema = new mongoose.Schema({
     },
     source: {
         type: String,
-        enum: ['Table QR', 'Waiter', 'Reception', 'Admin', 'Dine In', 'Dine-In', 'Takeaway', 'Delivery', 'POS'],
+        enum: ['Table QR', 'Waiter', 'Waiter POS', 'Reception', 'Admin', 'Dine In', 'Dine-In', 'Takeaway', 'Delivery', 'POS'],
         default: 'Waiter'
     },
     waiter: {

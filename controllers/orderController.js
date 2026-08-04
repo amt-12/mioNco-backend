@@ -635,6 +635,7 @@ exports.checkoutOrder = async (req, res) => {
             const io = req.app.get('io');
             if (io) {
                 io.emit('table_status_updated', table);
+                io.emit('table_payment_received', { tableId: table._id, tableNumber: table.tableNumber, tableName: table.name });
                 for (let order of activeOrders) {
                     io.emit('order_status_updated', order);
                 }
