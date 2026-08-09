@@ -41,7 +41,7 @@ const errorHandler = require('./middlewares/errorMiddleware');
 app.use('/api', apiRoutes);
 
 // Catch-all for unhandled non-API routes (Route Not Found)
-app.use('*', notFoundHandler);
+app.use(notFoundHandler);
 
 // Error Handling Middleware
 app.use(errorHandler);

@@ -40,6 +40,6 @@ router.use('/v1/upload', uploadRoutes);
 router.use('/v1/access-control', accessControlRoutes);
 
 // Fallback for unhandled API routes under /api
-router.use('*', notFoundHandler);
+router.use(notFoundHandler);
 
 module.exports = router;
