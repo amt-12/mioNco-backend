@@ -14,8 +14,14 @@ const app = express();
 // Middlewares
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(cors({
-    origin: ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:8080', 'http://127.0.0.1:8080'],
-    credentials: true,
+  origin: [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:8080',
+    'http://127.0.0.1:8080',
+    'https://admin.mioandco.co'
+  ],
+  credentials: true,
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -73,10 +79,16 @@ const PORT = process.env.PORT || 5000;
 const server = http.createServer(app);
 
 const io = new Server(server, {
-    cors: {
-        origin: ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:8080', 'http://127.0.0.1:8080'],
-        credentials: true
-    }
+  cors: {
+    origin: [
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+      'http://localhost:8080',
+      'http://127.0.0.1:8080',
+      'https://admin.mioandco.co'
+    ],
+    credentials: true
+  }
 });
 
 // Make io accessible to our router
