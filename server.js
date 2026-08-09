@@ -20,7 +20,7 @@ app.use(cors({
     'http://localhost:8080',
     'http://127.0.0.1:8080',
     'https://admin.mioandco.co',
-      'https://amt-12-mio-nexus-orchestra.mioco.workers.dev'
+    'https://amt-12-mio-nexus-orchestra.mioco.workers.dev'
 
   ],
   credentials: true,
@@ -33,42 +33,15 @@ const path = require('path');
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Route files
-const authRoutes = require('./routes/authRoutes');
-const dashboardRoutes = require('./routes/dashboardRoutes');
-const settingsRoutes = require('./routes/settingsRoutes');
-const floorRoutes = require('./routes/floorRoutes');
-const tableRoutes = require('./routes/tableRoutes');
-const menuRoutes = require('./routes/menuRoutes');
-const qrRoutes = require('./routes/qrRoutes');
-const reservationRoutes = require('./routes/reservationRoutes');
-const orderRoutes = require('./routes/orderRoutes');
-const waiterRoutes = require('./routes/waiterRoutes');
-const crmRoutes = require('./routes/crmRoutes');
-const notificationRoutes = require('./routes/notificationRoutes');
-const hrRoutes = require('./routes/hrRoutes');
-const feedbackRoutes = require('./routes/feedbackRoutes');
-const uploadRoutes = require('./routes/uploadRoutes');
-const accessControlRoutes = require('./routes/accessControlRoutes');
+const apiRoutes = require('./routes/api');
+const notFoundHandler = require('./routes/api/notFound');
 const errorHandler = require('./middlewares/errorMiddleware');
 
-// Mount routes
-app.use('/api/v1/auth', authRoutes);
-app.use('/api/v1/dashboard', dashboardRoutes);
-app.use('/api/v1/users', authRoutes);
-app.use('/api/v1/settings', settingsRoutes);
-app.use('/api/v1/floors', floorRoutes);
-app.use('/api/v1/tables', tableRoutes);
-app.use('/api/v1/qr', qrRoutes);
-app.use('/api/v1/menu', menuRoutes);
-app.use('/api/v1/reservations', reservationRoutes);
-app.use('/api/v1/orders', orderRoutes);
-app.use('/api/v1/waiters', waiterRoutes);
-app.use('/api/v1/crm', crmRoutes);
-app.use('/api/v1/notifications', notificationRoutes);
-app.use('/api/v1/hr', hrRoutes);
-app.use('/api/v1/feedback', feedbackRoutes);
-app.use('/api/v1/upload', uploadRoutes);
-app.use('/api/v1/access-control', accessControlRoutes);
+// Mount API routes
+app.use('/api', apiRoutes);
+
+// Catch-all for unhandled non-API routes (Route Not Found)
+app.use('*', notFoundHandler);
 
 // Error Handling Middleware
 app.use(errorHandler);
