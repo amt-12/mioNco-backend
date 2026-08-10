@@ -2,13 +2,10 @@ const express = require('express');
 const router = express.Router();
 const {
   getSections, createSection, updateSection, deleteSection,
-  getCategories, createCategory,
+  getCategories, createCategory, updateCategory, deleteCategory,
   getItems, getItem, createItem, updateItem, deleteItem,
   getMenuAnalytics
 } = require('../controllers/menuController');
-
-// Using mock auth middleware for now until we integrate the actual one
-// const { protect, authorize } = require('../middlewares/auth');
 
 router.route('/analytics').get(getMenuAnalytics);
 
@@ -19,6 +16,14 @@ router.route('/sections')
 router.route('/sections/:id')
   .put(updateSection)
   .delete(deleteSection);
+
+router.route('/categories')
+  .get(getCategories)
+  .post(createCategory);
+
+router.route('/categories/:id')
+  .put(updateCategory)
+  .delete(deleteCategory);
 
 router.route('/items')
   .get(getItems)

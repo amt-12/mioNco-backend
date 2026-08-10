@@ -19,6 +19,7 @@ app.use(cors({
     'http://127.0.0.1:5173',
     'http://localhost:8080',
     'http://127.0.0.1:8080',
+    'http://localhost:8081',
     'https://admin.mioandco.co',
     'https://amt-12-mio-nexus-orchestra.mioco.workers.dev'
 
@@ -60,6 +61,7 @@ const io = new Server(server, {
       'http://127.0.0.1:5173',
       'http://localhost:8080',
       'http://127.0.0.1:8080',
+      'http://localhost:8081',
       'https://admin.mioandco.co',
       'https://amt-12-mio-nexus-orchestra.mioco.workers.dev'
     ],
@@ -71,34 +73,23 @@ const io = new Server(server, {
 app.set('io', io);
 
 io.on('connection', (socket) => {
-    console.log(`Socket connected: ${socket.id}`);
-    
-    // Join a room for a specific floor to receive scoped updates
-    socket.on('join_floor', (floorId) => {
-        socket.join(`floor_${floorId}`);
-        console.log(`Socket ${socket.id} joined floor_${floorId}`);
-    });
+  console.log(`Socket connected: ${socket.id}`);
 
-    socket.on('leave_floor', (floorId) => {
-        socket.leave(`floor_${floorId}`);
-    });
+  // Join a room for a specific floor to receive scoped updates
+  socket.on('join_floor', (floorId) => {
+    socket.join(`floor_${floorId}`);
+    console.log(`Socket ${socket.id} joined floor_${floorId}`);
+  });
 
-    // Table OTP verification handlers between Waiter POS and Air Menu
-    socket.on('send_table_otp', (data) => {
-        console.log('Sending table OTP to Air Menu:', data);
-        io.emit('table_otp_prompt', data);
-    });
+  socket.on('leave_floor', (floorId) => {
+    socket.leave(`floor_${floorId}`);
+  });
 
-    socket.on('verify_table_otp', (data) => {
-        console.log('Verifying table OTP:', data);
-        io.emit('table_otp_verified', data);
-    });
-
-    socket.on('disconnect', () => {
-        console.log(`Socket disconnected: ${socket.id}`);
-    });
+  socket.on('disconnect', () => {
+    console.log(`Socket disconnected: ${socket.id}`);
+  });
 });
 
 server.listen(PORT, () => {
-    console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
+  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
 });

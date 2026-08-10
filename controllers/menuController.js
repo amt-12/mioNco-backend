@@ -1,4 +1,5 @@
 const MenuSection = require('../models/MenuSection');
+const MenuCategory = require('../models/MenuCategory');
 const MenuItem = require('../models/MenuItem');
 const AuditLog = require('../models/AuditLog');
 
@@ -64,7 +65,51 @@ exports.deleteSection = async (req, res) => {
   }
 };
 
-// --- MENU CATEGORIES (REMOVED) ---
+// --- MENU CATEGORIES ---
+exports.getCategories = async (req, res) => {
+  try {
+    const categories = await MenuCategory.find().sort({ displayOrder: 1 });
+    res.status(200).json({ success: true, data: categories });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.createCategory = async (req, res) => {
+  try {
+    const category = await MenuCategory.create(req.body);
+    await createAuditLog(req, 'Create', 'MenuCategory', category._id, null, category);
+    res.status(201).json({ success: true, data: category });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+exports.updateCategory = async (req, res) => {
+  try {
+    const oldCat = await MenuCategory.findById(req.params.id);
+    if (!oldCat) return res.status(404).json({ success: false, message: 'Category not found' });
+
+    const category = await MenuCategory.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    await createAuditLog(req, 'Update', 'MenuCategory', category._id, oldCat, category);
+    res.status(200).json({ success: true, data: category });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+exports.deleteCategory = async (req, res) => {
+  try {
+    const category = await MenuCategory.findById(req.params.id);
+    if (!category) return res.status(404).json({ success: false, message: 'Category not found' });
+
+    await category.deleteOne();
+    await createAuditLog(req, 'Delete', 'MenuCategory', category._id, category, null);
+    res.status(200).json({ success: true, data: {} });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
 // --- MENU ITEMS ---
 exports.getItems = async (req, res) => {

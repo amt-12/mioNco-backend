@@ -4,7 +4,34 @@ const orderItemSchema = new mongoose.Schema({
     menuItem: {
         type: mongoose.Schema.ObjectId,
         ref: 'MenuItem',
-        required: true
+        required: false
+    },
+    isOnRequest: {
+        type: Boolean,
+        default: false
+    },
+    foodName: {
+        type: String
+    },
+    itemType: {
+        type: String,
+        enum: ['Food', 'Liquor'],
+        default: 'Food'
+    },
+    taxType: {
+        type: String,
+        enum: ['GST', 'VAT'],
+        default: 'GST'
+    },
+    taxRate: {
+        type: Number
+    },
+    addedBy: {
+        type: mongoose.Schema.ObjectId,
+        ref: 'User'
+    },
+    reason: {
+        type: String
     },
     variant: {
         name: String,

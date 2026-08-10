@@ -10,7 +10,8 @@ const {
     getKitchenAnalytics,
     checkoutOrder,
     removeOrderItem,
-    addOrderItem
+    addOrderItem,
+    getOnRequestAuditLogs
 } = require('../controllers/orderController');
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
@@ -25,6 +26,8 @@ router.get('/public', getOrders);
 router.post('/public/checkout', checkoutOrder);
 
 router.use(protect);
+
+router.get('/on-request-audit', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getOnRequestAuditLogs);
 
 router.post('/', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), createOrder);
 

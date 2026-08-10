@@ -10,6 +10,8 @@ const MenuCategorySchema = new mongoose.Schema({
   parentCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'MenuCategory', default: null },
   visibilityStatus: { type: String, enum: ['Published', 'Hidden', 'Scheduled'], default: 'Published' },
   activeStatus: { type: Boolean, default: true },
+  taxType: { type: String, enum: ['GST', 'VAT', 'Exempt'], default: 'GST' },
+  taxRate: { type: Number, default: 5 },
   seoMetadata: {
     title: String,
     description: String

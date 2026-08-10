@@ -3,6 +3,8 @@ const DiningSession = require('../models/DiningSession');
 const MenuItem = require('../models/MenuItem');
 const ServiceRequest = require('../models/ServiceRequest');
 const Table = require('../models/Table');
+const AuditLog = require('../models/AuditLog');
+const RestaurantSettings = require('../models/RestaurantSettings');
 
 // Utility to generate IDs
 const generateId = async (prefix, model) => {
@@ -21,6 +23,64 @@ const generateId = async (prefix, model) => {
         if (!existing) unique = true;
     }
     return id;
+};
+
+// @desc    Place a new Order
+// @route   POST /api/v1/orders
+// Helper to consolidate multiple active orders for the same table session into ONE master order card
+const consolidateActiveTableOrders = async (tableId, sessionId) => {
+    try {
+        const activeOrders = await Order.find({
+            table: tableId,
+            session: sessionId,
+            status: { $nin: ['Completed', 'Cancelled'] }
+        }).sort({ createdAt: 1 });
+
+        if (activeOrders.length <= 1) return activeOrders[0] || null;
+
+        const masterOrder = activeOrders[0];
+        const redundantOrders = activeOrders.slice(1);
+
+        const RestaurantSettings = require('../models/RestaurantSettings');
+        const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
+        const defaultGST = settings?.taxSettings?.defaultGSTPercent ?? 5;
+        const defaultVAT = settings?.taxSettings?.defaultVATPercent ?? 20;
+
+        let itemsAppended = false;
+        for (const redOrder of redundantOrders) {
+            if (redOrder.items && redOrder.items.length > 0) {
+                masterOrder.items.push(...redOrder.items);
+                itemsAppended = true;
+            }
+            if (redOrder.customerNotes && !masterOrder.customerNotes?.includes(redOrder.customerNotes)) {
+                masterOrder.customerNotes = masterOrder.customerNotes 
+                    ? `${masterOrder.customerNotes} | ${redOrder.customerNotes}` 
+                    : redOrder.customerNotes;
+            }
+            await Order.findByIdAndDelete(redOrder._id);
+        }
+
+        if (itemsAppended) {
+            let subtotal = 0;
+            let totalTax = 0;
+            masterOrder.items.forEach(i => {
+                const itemTotal = i.totalPrice || (i.unitPrice * i.quantity) || 0;
+                subtotal += itemTotal;
+                const rate = i.taxRate || (i.itemType === 'Liquor' ? defaultVAT : defaultGST);
+                totalTax += (itemTotal * rate) / 100;
+            });
+
+            masterOrder.subtotal = Number(subtotal.toFixed(2));
+            masterOrder.tax = Number(totalTax.toFixed(2));
+            masterOrder.total = Math.round(subtotal + totalTax);
+            await masterOrder.save();
+        }
+
+        return masterOrder;
+    } catch (err) {
+        console.error('Error consolidating table active orders:', err);
+        return null;
+    }
 };
 
 // @desc    Place a new Order
@@ -82,10 +142,50 @@ exports.createOrder = async (req, res) => {
             }
         }
 
-        // 2. Calculate totals
-        let subtotal = 0;
+        // 2. Calculate totals & process items
+        const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
+        const defaultGST = settings?.taxSettings?.defaultGSTPercent ?? 5;
+        const defaultVAT = settings?.taxSettings?.defaultVATPercent ?? 20;
+
+        let addedSubtotal = 0;
+        let addedTax = 0;
+        const onRequestItemsLogged = [];
+
         const processedItems = items.map(item => {
-            let unitPrice = item.menuItem.basePrice || 0;
+            if (item.isOnRequest) {
+                const foodName = item.foodName || item.name || 'On-Request Item';
+                const itemType = item.itemType === 'Liquor' ? 'Liquor' : 'Food';
+                const taxType = item.taxType || (itemType === 'Liquor' ? 'VAT' : 'GST');
+                const taxRate = taxType === 'VAT' ? defaultVAT : defaultGST;
+                const unitPrice = item.unitPrice ?? item.price ?? 0;
+                const quantity = item.quantity || 1;
+                const totalPrice = unitPrice * quantity;
+                addedSubtotal += totalPrice;
+
+                const itemTax = (totalPrice * taxRate) / 100;
+                addedTax += itemTax;
+
+                const processedOnReq = {
+                    menuItem: null,
+                    isOnRequest: true,
+                    foodName,
+                    itemType,
+                    taxType,
+                    taxRate,
+                    unitPrice,
+                    quantity,
+                    totalPrice,
+                    notes: item.notes || item.reason || '',
+                    reason: item.reason || item.notes || '',
+                    addedBy: req.user?._id || waiter || null,
+                    status: 'Pending'
+                };
+
+                onRequestItemsLogged.push(processedOnReq);
+                return processedOnReq;
+            }
+
+            let unitPrice = item.menuItem?.basePrice || item.unitPrice || 0;
             if (item.variant && item.variant.price) unitPrice += item.variant.price;
             
             if (item.customizations) {
@@ -94,14 +194,18 @@ exports.createOrder = async (req, res) => {
                 });
             }
             
-            const totalPrice = unitPrice * item.quantity;
-            subtotal += totalPrice;
+            const totalPrice = unitPrice * (item.quantity || 1);
+            addedSubtotal += totalPrice;
+
+            const itemTax = (totalPrice * defaultGST) / 100;
+            addedTax += itemTax;
             
             return {
-                menuItem: item.menuItem._id,
+                menuItem: item.menuItem?._id || item.menuItem,
+                isOnRequest: false,
                 variant: item.variant,
                 customizations: item.customizations,
-                quantity: item.quantity,
+                quantity: item.quantity || 1,
                 unitPrice,
                 totalPrice,
                 notes: item.notes,
@@ -109,29 +213,95 @@ exports.createOrder = async (req, res) => {
             };
         });
 
-        // Simplified tax logic (10% flat for example purposes)
-        const tax = subtotal * 0.10;
-        const total = subtotal + tax;
+        const addedTotal = Math.round(addedSubtotal + addedTax);
 
-        // 3. Create the Order
-        const orderId = await generateId('ORD', Order);
-        const order = await Order.create({
-            orderId,
+        // 3. Find existing active order or create new master order for this table
+        let existingOrder = await Order.findOne({
+            table: validTableId,
             session: session._id,
-            table: tableId,
-            source,
-            waiter,
-            items: processedItems,
-            status: 'Pending Acceptance', // Default for KDS to review
-            priority,
-            subtotal,
-            tax,
-            total,
-            customerNotes
-        });
+            status: { $nin: ['Completed', 'Cancelled'] }
+        }).sort({ createdAt: 1 });
+
+        let order;
+
+        if (existingOrder) {
+            // Append items into existing active order for Table T1
+            existingOrder.items.push(...processedItems);
+
+            let subtotal = 0;
+            let totalTax = 0;
+            existingOrder.items.forEach(i => {
+                const itemTotal = i.totalPrice || (i.unitPrice * i.quantity) || 0;
+                subtotal += itemTotal;
+                const rate = i.taxRate || (i.itemType === 'Liquor' ? defaultVAT : defaultGST);
+                totalTax += (itemTotal * rate) / 100;
+            });
+
+            existingOrder.subtotal = Number(subtotal.toFixed(2));
+            existingOrder.tax = Number(totalTax.toFixed(2));
+            existingOrder.total = Math.round(subtotal + totalTax);
+
+            if (customerNotes && !existingOrder.customerNotes?.includes(customerNotes)) {
+                existingOrder.customerNotes = existingOrder.customerNotes
+                    ? `${existingOrder.customerNotes} | ${customerNotes}`
+                    : customerNotes;
+            }
+
+            if (priority === 'High') {
+                existingOrder.priority = 'High';
+            }
+
+            order = await existingOrder.save();
+        } else {
+            const tax = Number(addedTax.toFixed(2));
+            const total = Math.round(addedSubtotal + tax);
+            const orderId = await generateId('ORD', Order);
+            order = await Order.create({
+                orderId,
+                session: session._id,
+                table: validTableId,
+                source,
+                waiter: waiter || req.user?._id,
+                items: processedItems,
+                status: 'Pending Acceptance',
+                priority,
+                subtotal: Number(addedSubtotal.toFixed(2)),
+                tax,
+                total,
+                customerNotes
+            });
+        }
+
+        // Also clean up any legacy duplicate active orders for this table
+        await consolidateActiveTableOrders(validTableId, session._id);
+
+        // 3b. Log Audit Log entries for any On-Request Items added
+        if (onRequestItemsLogged.length > 0) {
+            try {
+                const staffId = req.user?._id || waiter || session.waiter;
+                const staffName = req.user?.name || 'Staff';
+                if (staffId) {
+                    await AuditLog.create({
+                        employeeId: staffId,
+                        employeeName: staffName,
+                        action: 'Add On-Request Item',
+                        entityType: 'Order',
+                        entityId: order._id,
+                        updatedValue: {
+                            orderId: order.orderId,
+                            tableId: validTableId,
+                            onRequestItems: onRequestItemsLogged
+                        },
+                        ipAddress: req.ip || ''
+                    });
+                }
+            } catch (auditErr) {
+                console.error('AuditLog error for on-request item:', auditErr);
+            }
+        }
 
         // 4. Update session total
-        session.totalAmount += total;
+        session.totalAmount += addedTotal;
         await session.save();
 
         // 5. Populate and emit to Kitchen
@@ -146,6 +316,7 @@ exports.createOrder = async (req, res) => {
         const io = req.app.get('io');
         if (io) {
             io.emit('new_kitchen_order', populatedOrder);
+            io.emit('order_status_updated', populatedOrder);
         }
 
         res.status(201).json({ success: true, data: populatedOrder });
@@ -160,10 +331,20 @@ exports.createOrder = async (req, res) => {
 exports.getOrders = async (req, res) => {
     try {
         const { status, table } = req.query;
+
+        // Automatically consolidate duplicate active orders per active dining session
+        try {
+            const activeSessions = await DiningSession.find({ status: 'Active' });
+            for (const sess of activeSessions) {
+                await consolidateActiveTableOrders(sess.table, sess._id);
+            }
+        } catch (cErr) {
+            console.error('Consolidation error in getOrders:', cErr);
+        }
+
         let query = {};
         
         if (status) {
-            // Can pass multiple statuses like status=Pending Acceptance,Preparing
             query.status = { $in: status.split(',') };
         }
         if (table) {
@@ -186,7 +367,11 @@ exports.getOrders = async (req, res) => {
         }
 
         const orders = await Order.find(query)
-            .populate('table')
+            .populate({
+                path: 'table',
+                populate: { path: 'floor', select: 'name floorNumber slug' }
+            })
+            .populate('floor', 'name floorNumber slug')
             .populate('waiter', 'name')
             .populate({
                 path: 'items.menuItem',
@@ -718,6 +903,26 @@ exports.addOrderItem = async (req, res) => {
         if (io) io.emit('order_status_updated', populatedOrder);
 
         res.status(200).json({ success: true, data: populatedOrder });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// @desc    Get Audit Logs for On-Request Items
+// @route   GET /api/v1/orders/on-request-audit
+// @access  Private
+exports.getOnRequestAuditLogs = async (req, res) => {
+    try {
+        const logs = await AuditLog.find({
+            $or: [
+                { action: 'Add On-Request Item' },
+                { entityType: 'OnRequestItem' }
+            ]
+        })
+        .populate('employeeId', 'name role email employeeId')
+        .sort({ createdAt: -1 });
+
+        res.status(200).json({ success: true, count: logs.length, data: logs });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }

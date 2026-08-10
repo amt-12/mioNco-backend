@@ -79,6 +79,8 @@ const MenuItemSchema = new mongoose.Schema({
   basePrice: { type: Number },
   discountedPrice: Number,
   taxInclusive: { type: Boolean, default: false },
+  taxType: { type: String, enum: ['Inherit', 'GST', 'VAT', 'Exempt'], default: 'Inherit' },
+  taxRate: { type: Number, default: null },
   variants: [VariantSchema],
   customizationGroups: [CustomizationGroupSchema],
   

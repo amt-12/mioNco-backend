@@ -88,6 +88,15 @@ const restaurantSettingsSchema = new mongoose.Schema({
         upiName: { type: String, default: 'Mio & Co.' },
         upiQrImage: { type: String, default: '' }
     },
+    taxSettings: {
+        serviceChargeRate: { type: Number, default: 5 },
+        serviceChargeEnabled: { type: Boolean, default: true },
+        gstEnabled: { type: Boolean, default: true },
+        vatEnabled: { type: Boolean, default: true },
+        defaultGSTPercent: { type: Number, default: 5 },
+        defaultVATPercent: { type: Number, default: 20 },
+        enableOTPForSensitiveActions: { type: Boolean, default: false }
+    },
     updatedBy: {
         type: mongoose.Schema.ObjectId,
         ref: 'User'
