@@ -371,7 +371,6 @@ exports.getOrders = async (req, res) => {
                 path: 'table',
                 populate: { path: 'floor', select: 'name floorNumber slug' }
             })
-            .populate('floor', 'name floorNumber slug')
             .populate('waiter', 'name')
             .populate({
                 path: 'items.menuItem',

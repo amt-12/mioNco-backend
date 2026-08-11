@@ -380,16 +380,16 @@ exports.splitBill = async (req, res) => {
 
     const createdSplitBills = [];
 
-    if (splitType === 'Equal') {
-      const count = Math.max(2, parseInt(splitCount));
-      const equalSubtotal = parentBill.subtotal / count;
-      const equalCgst = parentBill.cgstAmount / count;
-      const equalSgst = parentBill.sgstAmount / count;
-      const equalVat = parentBill.vatAmount / count;
-      const equalServiceCharge = parentBill.serviceChargeAmount / count;
-      const equalFinal = parentBill.finalAmount / count;
+    if (splitType === 'Equal' || !itemAllocations || !Array.isArray(itemAllocations) || itemAllocations.length === 0) {
+      const equalCount = Math.max(2, parseInt(splitCount) || 2);
+      const equalSubtotal = parentBill.subtotal / equalCount;
+      const equalCgst = parentBill.cgstAmount / equalCount;
+      const equalSgst = parentBill.sgstAmount / equalCount;
+      const equalVat = parentBill.vatAmount / equalCount;
+      const equalServiceCharge = parentBill.serviceChargeAmount / equalCount;
+      const equalFinal = parentBill.finalAmount / equalCount;
 
-      for (let i = 1; i <= count; i++) {
+      for (let i = 1; i <= equalCount; i++) {
         const splitNum = await generateBillNumber();
         const splitBill = await Bill.create({
           billNumber: `${splitNum}-S${i}`,
@@ -401,13 +401,13 @@ exports.splitBill = async (req, res) => {
             isSplit: true,
             parentBill: parentBill._id,
             splitIndex: i,
-            totalSplits: count,
+            totalSplits: equalCount,
             splitType: 'Equal'
           },
           items: parentBill.items.map(it => ({
             ...it.toObject(),
-            quantity: it.quantity / count,
-            totalPrice: it.totalPrice / count
+            quantity: it.quantity / equalCount,
+            totalPrice: it.totalPrice / equalCount
           })),
           subtotal: Number(equalSubtotal.toFixed(2)),
           cgstAmount: Number(equalCgst.toFixed(2)),
@@ -426,16 +426,25 @@ exports.splitBill = async (req, res) => {
         });
         createdSplitBills.push(splitBill);
       }
-    } else if (splitType === 'Itemized' && itemAllocations && Array.isArray(itemAllocations)) {
-      // itemAllocations format: [{ splitIndex: 1, itemId: '...', quantity: 1 }, ...]
-      const count = Math.max(...itemAllocations.map(a => a.splitIndex || 1));
+    } else if (splitType === 'Itemized') {
+      const requestedSplitsCount = Math.max(2, parseInt(splitCount) || 2, ...itemAllocations.map(a => a.splitIndex || 1));
 
-      for (let i = 1; i <= count; i++) {
+      for (let i = 1; i <= requestedSplitsCount; i++) {
         const allocsForIndex = itemAllocations.filter(a => a.splitIndex === i);
         const splitRawItems = [];
 
         allocsForIndex.forEach(alloc => {
-          const originalItem = parentBill.items.id(alloc.itemId) || parentBill.items.find(it => it._id.toString() === alloc.itemId);
+          let originalItem = null;
+          if (alloc.itemId) {
+            originalItem = parentBill.items.id(alloc.itemId) || parentBill.items.find(it => String(it._id) === String(alloc.itemId));
+          }
+          if (!originalItem && alloc.foodName) {
+            originalItem = parentBill.items.find(it => it.foodName === alloc.foodName);
+          }
+          if (!originalItem && alloc.itemIndex !== undefined && parentBill.items[alloc.itemIndex]) {
+            originalItem = parentBill.items[alloc.itemIndex];
+          }
+
           if (originalItem) {
             splitRawItems.push({
               menuItem: originalItem.menuItem,
@@ -468,7 +477,7 @@ exports.splitBill = async (req, res) => {
               isSplit: true,
               parentBill: parentBill._id,
               splitIndex: i,
-              totalSplits: count,
+              totalSplits: requestedSplitsCount,
               splitType: 'Itemized'
             },
             items: calculated.items,
@@ -492,15 +501,18 @@ exports.splitBill = async (req, res) => {
       }
     }
 
+    // Populate created split bills with table details
+    const populatedSplits = await Bill.find({ 'splitInfo.parentBill': parentBill._id }).populate('table');
+
     // Mark original parent bill status
     parentBill.status = 'Voided';
-    parentBill.notes = `Split into ${createdSplitBills.length} child bills`;
+    parentBill.notes = `Split into ${populatedSplits.length} child bills`;
     await parentBill.save();
 
     return res.json({
       success: true,
-      message: `Bill split successfully into ${createdSplitBills.length} bills`,
-      data: createdSplitBills
+      message: `Bill split successfully into ${populatedSplits.length} bills`,
+      data: populatedSplits.length > 0 ? populatedSplits : createdSplitBills
     });
   } catch (error) {
     console.error('Error splitting bill:', error);
@@ -518,16 +530,32 @@ exports.mergeBills = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Please select at least 2 bills to merge' });
     }
 
-    const billsToMerge = await Bill.find({ _id: { $in: billIds }, status: 'Active' });
+    const billsToMerge = await Bill.find({ _id: { $in: billIds }, status: 'Active' })
+      .populate({
+        path: 'table',
+        populate: { path: 'floor' }
+      });
+
     if (billsToMerge.length < 2) {
       return res.status(400).json({ success: false, message: 'Could not find 2 or more active bills to merge' });
     }
 
     const mergedItems = [];
     const mergedOrders = [];
+    const tableDescriptions = [];
 
     billsToMerge.forEach(b => {
       if (b.orders) mergedOrders.push(...b.orders);
+
+      if (b.table) {
+        const floorName = b.table.floor?.name || b.table.floor?.floorName || '';
+        const tableName = b.table.tableNumber ? `Table ${b.table.tableNumber}` : (b.table.name || 'Table');
+        const desc = floorName ? `${tableName} (${floorName})` : tableName;
+        if (!tableDescriptions.includes(desc)) {
+          tableDescriptions.push(desc);
+        }
+      }
+
       b.items.forEach(it => {
         mergedItems.push({
           menuItem: it.menuItem,
@@ -545,11 +573,15 @@ exports.mergeBills = async (req, res) => {
     const calculated = await calculateBillTotals(mergedItems);
     const billNumber = await generateBillNumber();
 
+    const mergeNotesText = tableDescriptions.length > 0
+      ? `Merged from ${tableDescriptions.join(' & ')}`
+      : `Merged from bills: ${billsToMerge.map(b => b.billNumber).join(', ')}`;
+
     const mergedBill = await Bill.create({
       billNumber: `${billNumber}-M`,
       orders: [...new Set(mergedOrders.map(o => o.toString()))],
       session: billsToMerge[0].session,
-      table: billsToMerge[0].table,
+      table: billsToMerge[0].table?._id || billsToMerge[0].table,
       customer: billsToMerge[0].customer,
       items: calculated.items,
       subtotal: calculated.subtotal,
@@ -565,7 +597,7 @@ exports.mergeBills = async (req, res) => {
       balanceDue: calculated.finalAmount,
       paymentStatus: 'Pending',
       status: 'Active',
-      notes: `Merged from bills: ${billsToMerge.map(b => b.billNumber).join(', ')}`,
+      notes: mergeNotesText,
       createdBy: req.user?._id
     });
 
@@ -575,10 +607,12 @@ exports.mergeBills = async (req, res) => {
       { status: 'Merged', notes: `Merged into ${mergedBill.billNumber}` }
     );
 
+    const populatedMergedBill = await Bill.findById(mergedBill._id).populate('table');
+
     return res.json({
       success: true,
       message: 'Bills merged successfully',
-      data: mergedBill
+      data: populatedMergedBill
     });
   } catch (error) {
     console.error('Error merging bills:', error);
@@ -709,11 +743,20 @@ exports.applyNonChargeable = async (req, res) => {
       bill.isNonChargeableBill = true;
       bill.ncStaffRemark = remark;
       if (employeeId) bill.ncEmployee = employeeId;
+      bill.paymentStatus = 'Non-Chargeable';
+      bill.status = 'Settled';
       bill.finalAmount = 0;
       bill.balanceDue = 0;
       bill.subtotal = 0;
       bill.totalTaxAmount = 0;
       bill.serviceChargeAmount = 0;
+
+      if (bill.orders && bill.orders.length > 0) {
+        await Order.updateMany(
+          { _id: { $in: bill.orders } },
+          { paymentStatus: 'Paid', status: 'Completed' }
+        );
+      }
     } else if (itemId) {
       const item = bill.items.id(itemId) || bill.items.find(i => i._id.toString() === itemId);
       if (item) {
@@ -967,17 +1010,54 @@ exports.recordPayment = async (req, res) => {
 
     await bill.save();
 
-    // If session associated, update session total amount and status if table is cleared
-    if (bill.session) {
-      const sessionDoc = await DiningSession.findById(bill.session);
-      if (sessionDoc && bill.paymentStatus === 'Paid') {
-        sessionDoc.paymentStatus = 'Paid';
-        sessionDoc.status = 'Completed';
-        sessionDoc.endTime = new Date();
-        await sessionDoc.save();
+    if (bill.paymentStatus === 'Paid') {
+      const io = req.app.get('socketio');
 
-        if (bill.table) {
-          await Table.findByIdAndUpdate(bill.table, { status: 'Available' });
+      // Update all associated Order documents
+      if (bill.orders && bill.orders.length > 0) {
+        await Order.updateMany(
+          { _id: { $in: bill.orders } },
+          { paymentStatus: 'Paid', status: 'Completed' }
+        );
+        if (io) {
+          bill.orders.forEach(oId => {
+            io.emit('order_status_updated', { _id: oId, paymentStatus: 'Paid', status: 'Completed' });
+          });
+        }
+      }
+
+      // Check if all active bills for this table are paid
+      const targetTableId = bill.table?._id || bill.table;
+      if (targetTableId) {
+        const remainingUnpaid = await Bill.countDocuments({
+          table: targetTableId,
+          _id: { $ne: bill._id },
+          status: 'Active',
+          paymentStatus: { $ne: 'Paid' }
+        });
+
+        if (remainingUnpaid === 0) {
+          const updatedTable = await Table.findByIdAndUpdate(
+            targetTableId,
+            { status: 'Available', currentSession: null },
+            { new: true }
+          );
+          if (io && updatedTable) {
+            io.emit('table_status_changed', updatedTable);
+            io.emit('table_status_updated', updatedTable);
+            io.emit('table_payment_completed', { tableId: targetTableId, billId: bill._id });
+          }
+        }
+      }
+
+      // If dining session associated
+      if (bill.session) {
+        const sessionDoc = await DiningSession.findById(bill.session);
+        if (sessionDoc) {
+          sessionDoc.paymentStatus = 'Paid';
+          sessionDoc.status = 'Completed';
+          sessionDoc.endTime = new Date();
+          await sessionDoc.save();
         }
       }
     }
