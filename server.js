@@ -21,7 +21,7 @@ app.use(cors({
     'http://127.0.0.1:8080',
     'http://localhost:8081',
     'https://admin.mioandco.co',
-    'https://mioandco.co/',
+    'https://mioandco.co',
     'https://amt-12-mio-nexus-orchestra.mioco.workers.dev'
 
   ],
