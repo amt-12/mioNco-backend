@@ -300,9 +300,56 @@ exports.createOrder = async (req, res) => {
             }
         }
 
-        // 4. Update session total
-        session.totalAmount += addedTotal;
-        await session.save();
+        // 4b. Customer Loyalty Spend Tracking & WhatsApp Coupon Trigger
+        let couponUnlocked = false;
+        let couponCode = '';
+        const customerPhone = req.body.customerPhone || req.body.phone;
+
+        if (customerPhone && String(customerPhone).trim().length >= 8) {
+            try {
+                const Customer = require('../models/Customer');
+                const NotificationLog = require('../models/NotificationLog');
+                const cleanPhone = String(customerPhone).trim();
+
+                let customer = await Customer.findOne({ phone: cleanPhone });
+                if (!customer) {
+                    customer = await Customer.create({
+                        name: `Customer (${cleanPhone.slice(-4)})`,
+                        phone: cleanPhone,
+                        totalSpend: 0,
+                        loyaltyPoints: 0
+                    });
+                }
+
+                const currentOrderTotal = Number(addedTotal || order.total || 0);
+                customer.totalSpend = (customer.totalSpend || 0) + currentOrderTotal;
+                customer.totalVisits = (customer.totalVisits || 0) + 1;
+                customer.lastVisit = new Date();
+                customer.loyaltyPoints = (customer.loyaltyPoints || 0) + Math.floor(currentOrderTotal / 100);
+
+                // Check if accumulated spend reaches ₹100,000 threshold
+                if (customer.totalSpend >= 100000 && !customer.unlocked100kCoupon) {
+                    couponUnlocked = true;
+                    couponCode = `LOYALTY5-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+                    customer.unlocked100kCoupon = true;
+                    customer.couponCode = couponCode;
+
+                    // Log & Send WhatsApp Notification
+                    const whatsappMsg = `🎉 Congratulations from Mio & Co.! You have reached ₹1,00,000 in orders! Here is your 5% DISCOUNT COUPON: *${couponCode}*. Show this to redeem on your next visit!`;
+                    await NotificationLog.create({
+                        channel: 'WhatsApp',
+                        subject: 'Mio & Co. 5% Loyalty Coupon',
+                        content: whatsappMsg,
+                        status: 'Sent',
+                        metadata: { phone: cleanPhone, couponCode, totalSpend: customer.totalSpend }
+                    });
+                }
+
+                await customer.save();
+            } catch (loyaltyErr) {
+                console.error('Loyalty tracking error:', loyaltyErr);
+            }
+        }
 
         // 5. Populate and emit to Kitchen
         const populatedOrder = await Order.findById(order._id)
@@ -319,7 +366,15 @@ exports.createOrder = async (req, res) => {
             io.emit('order_status_updated', populatedOrder);
         }
 
-        res.status(201).json({ success: true, data: populatedOrder });
+        res.status(201).json({ 
+            success: true, 
+            data: populatedOrder,
+            couponUnlocked,
+            couponCode,
+            message: couponUnlocked 
+                ? `Order placed! 5% WhatsApp coupon (${couponCode}) sent to your phone!` 
+                : 'Order placed successfully'
+        });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }

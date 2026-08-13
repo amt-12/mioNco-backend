@@ -120,12 +120,12 @@ const orderSchema = new mongoose.Schema({
     },
     paymentMethod: {
         type: String,
-        enum: ['Cash', 'UPI', 'Card', 'Pending'],
+        enum: ['Cash', 'UPI', 'Card', 'Pending', 'Non-Chargeable', 'NC'],
         default: 'Pending'
     },
     paymentStatus: {
         type: String,
-        enum: ['Pending', 'Paid', 'Failed'],
+        enum: ['Pending', 'Paid', 'Failed', 'Non-Chargeable'],
         default: 'Pending'
     },
     paymentDetails: {

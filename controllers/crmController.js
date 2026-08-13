@@ -1,5 +1,4 @@
 const Customer = require('../models/Customer');
-const LoyaltyTier = require('../models/LoyaltyTier');
 const CustomerActivity = require('../models/CustomerActivity');
 const Order = require('../models/Order');
 
@@ -147,28 +146,41 @@ exports.updateCustomerMetadata = async (req, res) => {
     }
 };
 
-// ---------------- LOYALTY SETTINGS ----------------
-
-// @desc    Get all loyalty tiers
-// @route   GET /api/v1/crm/loyalty-tiers
+// @desc    Send 5% WhatsApp Discount Coupon to Customer (>= ₹100,000 Spend)
+// @route   POST /api/v1/crm/customers/:id/send-coupon
 // @access  Private
-exports.getLoyaltyTiers = async (req, res) => {
+exports.sendWhatsAppCoupon = async (req, res) => {
     try {
-        const tiers = await LoyaltyTier.find().sort({ level: 1 });
-        res.status(200).json({ success: true, data: tiers });
+        const customer = await Customer.findById(req.params.id);
+        if (!customer) {
+            return res.status(404).json({ success: false, message: 'Customer not found' });
+        }
+
+        const couponCode = customer.couponCode || `LOYALTY5-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+        customer.unlocked100kCoupon = true;
+        customer.couponCode = couponCode;
+        await customer.save();
+
+        const NotificationLog = require('../models/NotificationLog');
+        const whatsappMsg = `🎉 Congratulations from Mio & Co.! You have reached ₹1,00,000 in orders! Here is your 5% DISCOUNT COUPON: *${couponCode}*. Show this to redeem on your next visit!`;
+
+        await NotificationLog.create({
+            channel: 'WhatsApp',
+            subject: '5% Loyalty Discount Coupon',
+            content: whatsappMsg,
+            status: 'Sent',
+            recipientCustomer: customer._id,
+            metadata: { phone: customer.phone, couponCode, totalSpend: customer.totalSpend }
+        });
+
+        res.status(200).json({ 
+            success: true, 
+            message: `5% WhatsApp Discount Coupon (${couponCode}) sent to ${customer.phone}!`,
+            couponCode 
+        });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
 };
 
-// @desc    Create a new loyalty tier
-// @route   POST /api/v1/crm/loyalty-tiers
-// @access  Private
-exports.createLoyaltyTier = async (req, res) => {
-    try {
-        const tier = await LoyaltyTier.create(req.body);
-        res.status(201).json({ success: true, data: tier });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    }
-};
+

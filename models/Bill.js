@@ -42,6 +42,7 @@ const billItemSchema = new mongoose.Schema({
   staffEmployeeId: String,
   isOnRequest: { type: Boolean, default: false },
   itemType: { type: String, enum: ['Food', 'Liquor'], default: 'Food' },
+  sectionName: String,
   addedBy: { type: mongoose.Schema.ObjectId, ref: 'User' },
   reason: String
 }, { _id: true });
@@ -81,7 +82,7 @@ const billSchema = new mongoose.Schema({
   subtotal: { type: Number, default: 0 },
   itemLevelDiscounts: { type: Number, default: 0 },
   
-  billDiscountType: { type: String, enum: ['Percentage', 'Fixed', 'None'], default: 'None' },
+  billDiscountType: { type: String, enum: ['Percentage', 'Fixed', 'Non-Chargeable', 'None'], default: 'None' },
   billDiscountValue: { type: Number, default: 0 },
   billDiscountAmount: { type: Number, default: 0 },
   billDiscountReason: String,
@@ -109,7 +110,7 @@ const billSchema = new mongoose.Schema({
   
   paymentStatus: {
     type: String,
-    enum: ['Pending', 'Partially Paid', 'Paid', 'Refunded', 'Voided', 'Cancelled'],
+    enum: ['Pending', 'Partially Paid', 'Paid', 'Refunded', 'Voided', 'Cancelled', 'Non-Chargeable'],
     default: 'Pending'
   },
   payments: [{

@@ -81,7 +81,12 @@ const customerSchema = new mongoose.Schema({
     marketingConsent: {
         type: Boolean,
         default: true
-    }
+    },
+    unlocked100kCoupon: {
+        type: Boolean,
+        default: false
+    },
+    couponCode: String
 }, {
     timestamps: true
 });

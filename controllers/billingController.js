@@ -139,6 +139,7 @@ const calculateBillTotals = async (rawItems, options = {}) => {
       staffEmployeeId: item.staffEmployeeId || '',
       isOnRequest: item.isOnRequest || false,
       itemType: item.itemType || (taxType === 'VAT' ? 'Liquor' : 'Food'),
+      sectionName: menuItemDoc?.section?.name || item.sectionName || '',
       addedBy: item.addedBy || null,
       reason: item.reason || ''
     });
@@ -530,45 +531,161 @@ exports.mergeBills = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Please select at least 2 bills to merge' });
     }
 
-    const billsToMerge = await Bill.find({ _id: { $in: billIds }, status: 'Active' })
+    const resolvedBillIds = [];
+
+    for (const id of billIds) {
+      if (!id) continue;
+      const idStr = String(id);
+
+      // 1. Try finding an existing non-voided Bill by _id
+      let b = await Bill.findOne({ _id: idStr, status: { $ne: 'Voided' } });
+
+      // 2. Try finding a Bill associated with this Order _id
+      if (!b) {
+        b = await Bill.findOne({ orders: idStr, status: { $ne: 'Voided' } });
+      }
+
+      // 3. If no bill exists for this Order ID, auto-generate one
+      if (!b) {
+        try {
+          const ord = await Order.findById(idStr).populate('items.menuItem');
+          if (ord) {
+            const rawItems = (ord.items || [])
+              .filter(item => item.status !== 'Cancelled')
+              .map(item => ({
+                menuItem: item.menuItem?._id || item.menuItem,
+                foodName: item.foodName || item.menuItem?.foodName || 'Food Item',
+                variantName: item.variant?.name,
+                unitPrice: item.unitPrice,
+                quantity: item.quantity,
+                totalPrice: item.totalPrice,
+                isOnRequest: item.isOnRequest || false,
+                itemType: item.itemType || 'Food',
+                taxType: item.taxType,
+                taxRate: item.taxRate,
+                isComplimentary: false,
+                isNonChargeable: false
+              }));
+
+            const calculated = await calculateBillTotals(rawItems);
+            const billNumber = await generateBillNumber();
+
+            b = await Bill.create({
+              billNumber,
+              orders: [ord._id],
+              session: ord.session,
+              table: ord.table,
+              items: calculated.items,
+              subtotal: calculated.subtotal,
+              cgstAmount: calculated.cgstAmount,
+              sgstAmount: calculated.sgstAmount,
+              vatAmount: calculated.vatAmount,
+              totalTaxAmount: calculated.totalTaxAmount,
+              serviceChargeRate: calculated.serviceChargeRate,
+              serviceChargeAmount: calculated.serviceChargeAmount,
+              serviceChargeEnabled: true,
+              taxesEnabled: true,
+              finalAmount: calculated.finalAmount,
+              balanceDue: calculated.finalAmount,
+              paymentStatus: 'Pending',
+              status: 'Active'
+            });
+          }
+        } catch (genErr) {
+          console.error('Auto-generate bill for merge error:', genErr);
+        }
+      }
+
+      if (b && !resolvedBillIds.some(existingId => String(existingId) === String(b._id))) {
+        resolvedBillIds.push(b._id);
+      }
+    }
+
+    const billsToMerge = await Bill.find({ _id: { $in: resolvedBillIds }, status: { $ne: 'Voided' } })
       .populate({
         path: 'table',
         populate: { path: 'floor' }
       });
 
-    if (billsToMerge.length < 2) {
-      return res.status(400).json({ success: false, message: 'Could not find 2 or more active bills to merge' });
+    if (billsToMerge.length < 1) {
+      return res.status(400).json({ success: false, message: 'No active bills or orders found to merge' });
     }
 
-    const mergedItems = [];
+    const rawMergedItems = [];
     const mergedOrders = [];
     const tableDescriptions = [];
 
-    billsToMerge.forEach(b => {
-      if (b.orders) mergedOrders.push(...b.orders);
+    // Check if all bills to merge belong to the same parent bill (e.g. merging split child bills)
+    const parentIds = billsToMerge.map(b => b.splitInfo?.parentBill).filter(Boolean).map(String);
+    const uniqueParentIds = [...new Set(parentIds)];
 
-      if (b.table) {
-        const floorName = b.table.floor?.name || b.table.floor?.floorName || '';
-        const tableName = b.table.tableNumber ? `Table ${b.table.tableNumber}` : (b.table.name || 'Table');
-        const desc = floorName ? `${tableName} (${floorName})` : tableName;
-        if (!tableDescriptions.includes(desc)) {
-          tableDescriptions.push(desc);
-        }
+    if (uniqueParentIds.length === 1 && billsToMerge.every(b => b.splitInfo?.isSplit)) {
+      const parentBillDoc = await Bill.findById(uniqueParentIds[0]);
+      if (parentBillDoc && parentBillDoc.items && parentBillDoc.items.length > 0) {
+        parentBillDoc.items.forEach(it => {
+          rawMergedItems.push({
+            menuItem: it.menuItem,
+            foodName: it.foodName,
+            variantName: it.variantName,
+            unitPrice: it.unitPrice,
+            quantity: it.quantity,
+            totalPrice: it.totalPrice,
+            isComplimentary: it.isComplimentary,
+            isNonChargeable: it.isNonChargeable,
+            taxType: it.taxType,
+            taxRate: it.taxRate,
+            sectionName: it.sectionName
+          });
+        });
+        if (parentBillDoc.orders) mergedOrders.push(...parentBillDoc.orders);
       }
+    }
 
-      b.items.forEach(it => {
-        mergedItems.push({
-          menuItem: it.menuItem,
-          foodName: it.foodName,
-          variantName: it.variantName,
-          unitPrice: it.unitPrice,
-          quantity: it.quantity,
-          totalPrice: it.totalPrice,
-          isComplimentary: it.isComplimentary,
-          isNonChargeable: it.isNonChargeable
+    if (rawMergedItems.length === 0) {
+      billsToMerge.forEach(b => {
+        if (b.orders) mergedOrders.push(...b.orders);
+
+        if (b.table) {
+          const floorName = b.table.floor?.name || b.table.floor?.floorName || '';
+          const tableName = b.table.tableNumber ? `Table ${b.table.tableNumber}` : (b.table.name || 'Table');
+          const desc = floorName ? `${tableName} (${floorName})` : tableName;
+          if (!tableDescriptions.includes(desc)) {
+            tableDescriptions.push(desc);
+          }
+        }
+
+        b.items.forEach(it => {
+          rawMergedItems.push({
+            menuItem: it.menuItem,
+            foodName: it.foodName,
+            variantName: it.variantName,
+            unitPrice: it.unitPrice,
+            quantity: it.quantity,
+            totalPrice: it.totalPrice,
+            isComplimentary: it.isComplimentary,
+            isNonChargeable: it.isNonChargeable,
+            taxType: it.taxType,
+            taxRate: it.taxRate,
+            sectionName: it.sectionName
+          });
         });
       });
+    }
+
+    // Consolidate identical items by combining quantities
+    const itemMap = new Map();
+    rawMergedItems.forEach(it => {
+      const key = `${it.foodName}||${it.variantName || ''}||${it.unitPrice}||${it.isComplimentary || false}||${it.isNonChargeable || false}`;
+      if (itemMap.has(key)) {
+        const existing = itemMap.get(key);
+        existing.quantity += (it.quantity || 1);
+        existing.totalPrice = (existing.isComplimentary || existing.isNonChargeable) ? 0 : existing.unitPrice * existing.quantity;
+      } else {
+        itemMap.set(key, { ...it, quantity: it.quantity || 1 });
+      }
     });
+
+    const mergedItems = Array.from(itemMap.values());
 
     const calculated = await calculateBillTotals(mergedItems);
     const billNumber = await generateBillNumber();
@@ -632,32 +749,57 @@ exports.applyDiscount = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Bill not found' });
     }
 
-    const calculated = await calculateBillTotals(bill.items, {
-      taxesEnabled: bill.taxesEnabled,
-      serviceChargeEnabled: bill.serviceChargeEnabled,
-      customServiceChargeRate: bill.serviceChargeRate,
-      discountType: discountType || 'None',
-      discountValue: Number(discountValue || 0),
-      isComplimentaryBill: bill.isComplimentaryBill,
-      isNonChargeableBill: bill.isNonChargeableBill
-    });
+    // Handle split bills: apply discount across all sibling split bills for the table/parent bill
+    let siblingBills = [bill];
+    const parentId = bill.splitInfo?.parentBill || (bill.splitInfo?.isSplit ? bill._id : null);
+    if (parentId) {
+      const splits = await Bill.find({ $or: [{ 'splitInfo.parentBill': parentId }, { _id: parentId }], status: { $ne: 'Cancelled' } });
+      if (splits && splits.length > 0) siblingBills = splits;
+    }
 
-    bill.billDiscountType = discountType || 'None';
-    bill.billDiscountValue = Number(discountValue || 0);
-    bill.billDiscountAmount = calculated.billDiscountAmount;
-    bill.billDiscountReason = discountReason || '';
+    const combinedSubtotal = siblingBills.reduce((sum, b) => sum + (b.subtotal || 0), 0);
 
-    bill.cgstAmount = calculated.cgstAmount;
-    bill.sgstAmount = calculated.sgstAmount;
-    bill.vatAmount = calculated.vatAmount;
-    bill.totalTaxAmount = calculated.totalTaxAmount;
-    bill.serviceChargeAmount = calculated.serviceChargeAmount;
-    bill.finalAmount = calculated.finalAmount;
-    bill.balanceDue = Math.max(0, calculated.finalAmount - bill.amountPaid);
+    for (const sBill of siblingBills) {
+      let bDiscountVal = Number(discountValue || 0);
 
-    await bill.save();
+      // If fixed amount discount on split order, proportion fixed discount by subtotal
+      if (discountType === 'Fixed' && siblingBills.length > 1 && combinedSubtotal > 0) {
+        bDiscountVal = Number(((discountValue * (sBill.subtotal || 0)) / combinedSubtotal).toFixed(2));
+      }
 
-    return res.json({ success: true, message: 'Discount applied', data: bill });
+      const calculated = await calculateBillTotals(sBill.items, {
+        taxesEnabled: sBill.taxesEnabled,
+        serviceChargeEnabled: sBill.serviceChargeEnabled,
+        customServiceChargeRate: sBill.serviceChargeRate,
+        discountType: discountType || 'None',
+        discountValue: bDiscountVal,
+        isComplimentaryBill: sBill.isComplimentaryBill,
+        isNonChargeableBill: sBill.isNonChargeableBill
+      });
+
+      sBill.billDiscountType = discountType || 'None';
+      sBill.billDiscountValue = bDiscountVal;
+      sBill.billDiscountAmount = calculated.billDiscountAmount;
+      sBill.billDiscountReason = discountReason || '';
+
+      sBill.cgstAmount = calculated.cgstAmount;
+      sBill.sgstAmount = calculated.sgstAmount;
+      sBill.vatAmount = calculated.vatAmount;
+      sBill.totalTaxAmount = calculated.totalTaxAmount;
+      sBill.serviceChargeAmount = calculated.serviceChargeAmount;
+      sBill.finalAmount = calculated.finalAmount;
+      sBill.balanceDue = Math.max(0, calculated.finalAmount - sBill.amountPaid);
+
+      await sBill.save();
+    }
+
+    const updatedBill = await Bill.findById(req.params.id);
+    let responseData = updatedBill;
+    if (siblingBills.length > 1) {
+      const allUpdatedSplits = await Bill.find({ $or: [{ 'splitInfo.parentBill': parentId }, { _id: parentId }], status: { $ne: 'Cancelled' } });
+      if (allUpdatedSplits && allUpdatedSplits.length > 0) responseData = allUpdatedSplits;
+    }
+    return res.json({ success: true, message: 'Discount applied', data: responseData });
   } catch (error) {
     console.error('Error applying discount:', error);
     return res.status(500).json({ success: false, message: error.message });
@@ -1011,7 +1153,7 @@ exports.recordPayment = async (req, res) => {
     await bill.save();
 
     if (bill.paymentStatus === 'Paid') {
-      const io = req.app.get('socketio');
+      const io = req.app.get('io') || req.app.get('socketio');
 
       // Update all associated Order documents
       if (bill.orders && bill.orders.length > 0) {
@@ -1021,7 +1163,7 @@ exports.recordPayment = async (req, res) => {
         );
         if (io) {
           bill.orders.forEach(oId => {
-            io.emit('order_status_updated', { _id: oId, paymentStatus: 'Paid', status: 'Completed' });
+            io.emit('order_status_updated', { _id: oId, paymentStatus: 'Paid', status: 'Completed', table: bill.table });
           });
         }
       }
@@ -1045,7 +1187,11 @@ exports.recordPayment = async (req, res) => {
           if (io && updatedTable) {
             io.emit('table_status_changed', updatedTable);
             io.emit('table_status_updated', updatedTable);
+            io.emit('table_payment_completed', { tableId: targetTableId, billId: bill._id, tableNumber: updatedTable.tableNumber || updatedTable.name });
+            io.emit('table_payment_received', { tableId: targetTableId, billId: bill._id, tableNumber: updatedTable.tableNumber || updatedTable.name });
+          } else if (io) {
             io.emit('table_payment_completed', { tableId: targetTableId, billId: bill._id });
+            io.emit('table_payment_received', { tableId: targetTableId, billId: bill._id });
           }
         }
       }

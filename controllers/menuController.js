@@ -22,7 +22,23 @@ const createAuditLog = async (req, action, entityType, entityId, previousValue, 
 // --- MENU SECTIONS ---
 exports.getSections = async (req, res) => {
   try {
-    const sections = await MenuSection.find().sort({ displayOrder: 1 });
+    const { floorId } = req.query;
+    let query = {};
+
+    if (floorId) {
+      const mongoose = require('mongoose');
+      if (mongoose.Types.ObjectId.isValid(floorId)) {
+        query = {
+          $or: [
+            { floors: floorId },
+            { floors: { $exists: true, $size: 0 } },
+            { floors: null }
+          ]
+        };
+      }
+    }
+
+    const sections = await MenuSection.find(query).populate('floors', 'name floorNumber').sort({ displayOrder: 1, createdAt: 1 });
     res.status(200).json({ success: true, data: sections });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -117,8 +133,21 @@ exports.getItems = async (req, res) => {
     const query = {};
     if (req.query.status) query.status = req.query.status;
     if (req.query.category) query.categories = req.query.category;
+    if (req.query.publishState) query.publishState = req.query.publishState;
     
-    const items = await MenuItem.find(query).populate('section');
+    let items = await MenuItem.find(query).populate({
+      path: 'section',
+      populate: { path: 'floors' }
+    });
+
+    if (req.query.floorId) {
+      const targetFloorId = req.query.floorId.toString();
+      items = items.filter(item => {
+        if (!item.section || !item.section.floors || item.section.floors.length === 0) return true;
+        return item.section.floors.some(f => (f._id || f).toString() === targetFloorId);
+      });
+    }
+
     res.status(200).json({ success: true, count: items.length, data: items });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
