@@ -22,19 +22,28 @@ const createAuditLog = async (req, action, entityType, entityId, previousValue, 
 // --- MENU SECTIONS ---
 exports.getSections = async (req, res) => {
   try {
-    const { floorId } = req.query;
+    const { floorId, publishState } = req.query;
     let query = {};
+
+    if (publishState) {
+      query.publishState = publishState;
+    }
 
     if (floorId) {
       const mongoose = require('mongoose');
       if (mongoose.Types.ObjectId.isValid(floorId)) {
-        query = {
+        const floorMatch = {
           $or: [
             { floors: floorId },
             { floors: { $exists: true, $size: 0 } },
             { floors: null }
           ]
         };
+        if (publishState) {
+          query = { $and: [{ publishState }, floorMatch] };
+        } else {
+          query = floorMatch;
+        }
       }
     }
 
@@ -137,8 +146,15 @@ exports.getItems = async (req, res) => {
     
     let items = await MenuItem.find(query).populate({
       path: 'section',
-      populate: { path: 'floors' }
+      populate: { path: 'floors', select: 'name floorNumber slug' }
     });
+
+    if (req.query.publishState === 'Published') {
+      items = items.filter(item => {
+        if (item.section && item.section.publishState === 'Draft') return false;
+        return true;
+      });
+    }
 
     if (req.query.floorId) {
       const targetFloorId = req.query.floorId.toString();

@@ -11,7 +11,8 @@ const {
     checkoutOrder,
     removeOrderItem,
     addOrderItem,
-    getOnRequestAuditLogs
+    getOnRequestAuditLogs,
+    getPopularItemsByFloor
 } = require('../controllers/orderController');
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
@@ -27,6 +28,7 @@ router.post('/public/checkout', checkoutOrder);
 
 router.use(protect);
 
+router.get('/popular-by-floor', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Kitchen Staff'), getPopularItemsByFloor);
 router.get('/on-request-audit', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getOnRequestAuditLogs);
 
 router.post('/', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), createOrder);

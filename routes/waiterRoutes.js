@@ -5,7 +5,9 @@ const {
     createServiceRequest,
     getTableRequests,
     updateRequestStatus,
-    getMyTasks
+    getMyTasks,
+    getRequestHistory,
+    getWaiterPunchStats
 } = require('../controllers/waiterController');
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
@@ -20,9 +22,11 @@ router.get('/requests/public', getTableRequests);
 router.use(protect);
 
 router.put('/assign', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), assignWaiter);
-router.get('/active', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), getActiveWaiters);
+router.get('/active', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter Manager', 'Waiter'), getActiveWaiters);
+router.get('/punch-stats', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter Manager', 'Waiter'), getWaiterPunchStats);
 
 router.get('/my-tasks', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getMyTasks);
+router.get('/requests/history', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getRequestHistory);
 router.put('/requests/:id/status', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), updateRequestStatus);
 
 module.exports = router;

@@ -1,5 +1,6 @@
 const InventoryItem = require('../models/InventoryItem');
 const InventoryTransaction = require('../models/InventoryTransaction');
+const FloorStockAssignment = require('../models/FloorStockAssignment');
 
 // @desc    Get all inventory items
 // @route   GET /api/v1/inventory
@@ -366,6 +367,186 @@ exports.deleteInventoryItem = async (req, res) => {
     });
   } catch (error) {
     console.error('Error deleting inventory item:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Assign Dry Stock / Inventory item to Floor / Kitchen
+// @route   POST /api/v1/inventory/assign-floor
+// @access  Private
+exports.assignStockToFloor = async (req, res) => {
+  try {
+    const { inventoryItemId, floorId, floorName, quantity, notes } = req.body;
+
+    const item = await InventoryItem.findById(inventoryItemId);
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Inventory item not found' });
+    }
+
+    const qty = Number(quantity);
+    if (isNaN(qty) || qty <= 0) {
+      return res.status(400).json({ success: false, message: 'Please enter a valid positive quantity' });
+    }
+
+    if (item.currentStock < qty) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient stock in Central Inventory! Available: ${item.currentStock} ${item.unit}, Requested: ${qty} ${item.unit}`
+      });
+    }
+
+    const targetFloorName = floorName || 'Kitchen Station';
+    const prevStock = item.currentStock;
+    const newStock = prevStock - qty;
+
+    item.currentStock = newStock;
+    await item.save();
+
+    // Record Inventory Transfer Transaction
+    const transaction = await InventoryTransaction.create({
+      inventoryItem: item._id,
+      itemName: item.name,
+      type: 'Transfer',
+      quantity: qty,
+      previousStock: prevStock,
+      newStock: newStock,
+      unitCost: item.unitCost,
+      totalCost: qty * item.unitCost,
+      transferFrom: 'Central Store',
+      transferTo: targetFloorName,
+      reason: notes || `Stock assigned to ${targetFloorName}`,
+      recordedBy: req.user?._id,
+      recordedByName: req.user?.name || 'Staff'
+    });
+
+    // Create Floor Assignment Log
+    const assignment = await FloorStockAssignment.create({
+      inventoryItem: item._id,
+      itemName: item.name,
+      category: item.category,
+      unit: item.unit,
+      quantity: qty,
+      floor: floorId || undefined,
+      floorName: targetFloorName,
+      unitCost: item.unitCost,
+      totalValue: qty * item.unitCost,
+      assignedBy: req.user?._id,
+      assignedByName: req.user?.name || 'Staff',
+      notes: notes || '',
+      assignedAt: new Date()
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: `Assigned ${qty} ${item.unit} of ${item.name} to ${targetFloorName}`,
+      data: {
+        item,
+        transaction,
+        assignment
+      }
+    });
+  } catch (error) {
+    console.error('Error assigning stock to floor:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Get all Floor Stock Assignments
+// @route   GET /api/v1/inventory/floor-assignments
+// @access  Private
+exports.getFloorAssignments = async (req, res) => {
+  try {
+    const { floorName, status = 'Assigned' } = req.query;
+    let query = {};
+
+    if (floorName && floorName !== 'All') {
+      query.floorName = floorName;
+    }
+    if (status && status !== 'All') {
+      query.status = status;
+    }
+
+    const assignments = await FloorStockAssignment.find(query)
+      .sort({ assignedAt: -1 })
+      .populate('inventoryItem', 'name sku category unit currentStock');
+
+    // Group floor summary metrics
+    const floorSummaryMap = {};
+    assignments.forEach(a => {
+      if (!floorSummaryMap[a.floorName]) {
+        floorSummaryMap[a.floorName] = {
+          floorName: a.floorName,
+          totalAssignedItems: 0,
+          totalAssignedQty: 0,
+          totalValue: 0,
+          items: []
+        };
+      }
+      floorSummaryMap[a.floorName].totalAssignedItems += 1;
+      floorSummaryMap[a.floorName].totalAssignedQty += a.quantity;
+      floorSummaryMap[a.floorName].totalValue += a.totalValue;
+      floorSummaryMap[a.floorName].items.push(a);
+    });
+
+    return res.status(200).json({
+      success: true,
+      count: assignments.length,
+      floorSummary: Object.values(floorSummaryMap),
+      data: assignments
+    });
+  } catch (error) {
+    console.error('Error fetching floor assignments:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Return stock from Floor back to Central Inventory Store
+// @route   DELETE /api/v1/inventory/floor-assignments/:id
+// @access  Private
+exports.returnFloorStock = async (req, res) => {
+  try {
+    const assignment = await FloorStockAssignment.findById(req.params.id);
+    if (!assignment) {
+      return res.status(404).json({ success: false, message: 'Floor assignment record not found' });
+    }
+
+    if (assignment.status === 'Returned') {
+      return res.status(400).json({ success: false, message: 'Stock has already been returned to central inventory store' });
+    }
+
+    const item = await InventoryItem.findById(assignment.inventoryItem);
+    if (item) {
+      const prevStock = item.currentStock;
+      const newStock = prevStock + assignment.quantity;
+      item.currentStock = newStock;
+      await item.save();
+
+      await InventoryTransaction.create({
+        inventoryItem: item._id,
+        itemName: item.name,
+        type: 'Transfer',
+        quantity: assignment.quantity,
+        previousStock: prevStock,
+        newStock: newStock,
+        unitCost: assignment.unitCost,
+        totalCost: assignment.totalValue,
+        transferFrom: assignment.floorName,
+        transferTo: 'Central Store',
+        reason: 'Stock returned from floor back to central store',
+        recordedBy: req.user?._id,
+        recordedByName: req.user?.name || 'Staff'
+      });
+    }
+
+    assignment.status = 'Returned';
+    await assignment.save();
+
+    return res.status(200).json({
+      success: true,
+      message: `Returned ${assignment.quantity} ${assignment.unit} of ${assignment.itemName} from ${assignment.floorName} back to Central Store`
+    });
+  } catch (error) {
+    console.error('Error returning floor stock:', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

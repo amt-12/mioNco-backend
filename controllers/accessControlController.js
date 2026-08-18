@@ -32,6 +32,17 @@ const SYSTEM_MODULES = [
     ]
   },
   {
+    id: 'billing_group',
+    name: 'Billing & Invoices',
+    icon: 'DollarOutlined',
+    key: 'billing-group',
+    children: [
+      { id: 'revenue_overview', name: 'Revenue Overview', key: '/billing/dashboard' },
+      { id: 'invoices_directory', name: 'Invoices Directory', key: '/billing/invoices' },
+      { id: 'daily_sales_report', name: 'Daily Sales Report', key: '/billing/daily-sales-report' }
+    ]
+  },
+  {
     id: 'qr_group',
     name: 'QR Management',
     icon: 'QrcodeOutlined',
@@ -50,7 +61,25 @@ const SYSTEM_MODULES = [
       { id: 'order_dashboard', name: 'Order Dashboard', key: '/orders/dashboard' },
       { id: 'waiter_pos', name: 'Waiter POS', key: '/orders/pos' },
       { id: 'all_orders', name: 'All Orders', key: '/orders/list' },
+      { id: 'popular_by_floor', name: 'Most Ordered by Floor', key: '/orders/popular-by-floor' }
     ]
+  },
+  {
+    id: 'inventory_group',
+    name: 'Inventory Management',
+    icon: 'InboxOutlined',
+    key: 'inventory-group',
+    children: [
+      { id: 'inventory_dashboard', name: 'Inventory Dashboard', key: '/inventory/dashboard' },
+      { id: 'inventory_items', name: 'Raw Materials & Stock', key: '/inventory/items' },
+      { id: 'inventory_reports', name: 'Item-wise Reports', key: '/inventory/reports' }
+    ]
+  },
+  {
+    id: 'spoilage',
+    name: 'Food Spoilage Log',
+    icon: 'WarningOutlined',
+    key: '/spoilage'
   },
   {
     id: 'kitchen',

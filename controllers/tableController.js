@@ -323,9 +323,10 @@ exports.freeTablePublic = async (req, res, next) => {
 
         // Set table back to Available
         table.status = 'Available';
+        table.assignedWaiter = null;
         table.activityHistory.push({
             status: 'Available',
-            note: 'Customer checked out via AIR Menu.'
+            note: 'Table released / switched by customer via AIR Menu.'
         });
         await table.save();
 

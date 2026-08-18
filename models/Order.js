@@ -65,7 +65,13 @@ const orderItemSchema = new mongoose.Schema({
     },
     servedAt: Date,
     cancelledAt: Date,
-    cancelledReason: String
+    cancelledReason: String,
+    isSpoiled: {
+        type: Boolean,
+        default: false
+    },
+    spoilageRemarks: String,
+    spoilageMarkedBy: String
 }, { _id: true }); // ensure subdocs have IDs
 
 const orderSchema = new mongoose.Schema({

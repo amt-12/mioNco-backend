@@ -7,7 +7,10 @@ const {
   recordTransaction,
   getInventoryTransactions,
   getInventoryReport,
-  deleteInventoryItem
+  deleteInventoryItem,
+  assignStockToFloor,
+  getFloorAssignments,
+  returnFloorStock
 } = require('../controllers/inventoryController');
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
@@ -19,6 +22,10 @@ router.use(protect);
 router.get('/report', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Inventory Manager', 'Chef'), getInventoryReport);
 router.get('/transactions', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Inventory Manager', 'Chef'), getInventoryTransactions);
 router.post('/transaction', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Inventory Manager', 'Chef'), recordTransaction);
+
+router.post('/assign-floor', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Inventory Manager', 'Chef'), assignStockToFloor);
+router.get('/floor-assignments', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Inventory Manager', 'Chef'), getFloorAssignments);
+router.delete('/floor-assignments/:id', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), returnFloorStock);
 
 router.route('/')
   .get(authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Inventory Manager', 'Chef'), getInventoryItems)

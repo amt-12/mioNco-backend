@@ -5,6 +5,7 @@ const MenuSectionSchema = new mongoose.Schema({
   description: String,
   bannerImage: String,
   status: { type: String, enum: ['Active', 'Inactive'], default: 'Active' },
+  publishState: { type: String, enum: ['Published', 'Draft'], default: 'Draft' },
   visibility: { type: String, enum: ['Public', 'Hidden', 'Internal'], default: 'Public' },
   seoMetadata: {
     title: String,
@@ -15,3 +16,4 @@ const MenuSectionSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 module.exports = mongoose.model('MenuSection', MenuSectionSchema);
+

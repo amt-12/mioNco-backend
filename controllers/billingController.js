@@ -5,6 +5,8 @@ const MenuItem = require('../models/MenuItem');
 const MenuCategory = require('../models/MenuCategory');
 const RestaurantSettings = require('../models/RestaurantSettings');
 const Table = require('../models/Table');
+const FoodSpoilage = require('../models/FoodSpoilage');
+const AuditLog = require('../models/AuditLog');
 
 // Helper to generate Unique Bill Number
 const generateBillNumber = async () => {
@@ -62,11 +64,12 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     const unitPrice = item.unitPrice ?? (item.totalPrice / (item.quantity || 1)) ?? 0;
     const quantity = item.quantity || 1;
     
-    // Check complimentary/NC flags on item
+    // Check complimentary/NC/spoiled flags on item
+    const isSpoiled = Boolean(item.isSpoiled);
     const isComp = item.isComplimentary || isComplimentaryBill || isNonChargeableBill;
     const isNC = item.isNonChargeable || isNonChargeableBill;
 
-    let totalPrice = isComp || isNC ? 0 : unitPrice * quantity;
+    let totalPrice = isSpoiled || isComp || isNC ? 0 : unitPrice * quantity;
     subtotal += totalPrice;
 
     // Tax Determination Logic (On-Request -> Item -> Category -> System Default)
@@ -105,7 +108,7 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     let itemSGST = 0;
     let itemVAT = 0;
 
-    if (taxesEnabled && !isComp && !isNC && totalPrice > 0) {
+    if (taxesEnabled && !isSpoiled && !isComp && !isNC && totalPrice > 0) {
       if (taxType === 'GST') {
         const halfRate = taxRate / 2;
         itemCGST = (totalPrice * halfRate) / 100;
@@ -126,7 +129,7 @@ const calculateBillTotals = async (rawItems, options = {}) => {
       variantName,
       unitPrice,
       quantity,
-      totalPrice,
+      totalPrice: isSpoiled ? 0 : totalPrice,
       taxType,
       taxRate,
       cgstAmount: Number(itemCGST.toFixed(2)),
@@ -138,6 +141,9 @@ const calculateBillTotals = async (rawItems, options = {}) => {
       ncRemark: item.ncRemark || '',
       staffEmployeeId: item.staffEmployeeId || '',
       isOnRequest: item.isOnRequest || false,
+      isSpoiled,
+      spoilageRemarks: item.spoilageRemarks || '',
+      spoilageMarkedBy: item.spoilageMarkedBy || '',
       itemType: item.itemType || (taxType === 'VAT' ? 'Liquor' : 'Food'),
       sectionName: menuItemDoc?.section?.name || item.sectionName || '',
       addedBy: item.addedBy || null,
@@ -226,14 +232,18 @@ exports.generateBill = async (req, res) => {
     targetOrders.forEach(ord => {
       ord.items.forEach(item => {
         if (item.status !== 'Cancelled') {
+          const isSpoiled = Boolean(item.isSpoiled);
           rawItems.push({
             menuItem: item.menuItem?._id || item.menuItem,
             foodName: item.foodName || item.menuItem?.foodName || 'Food Item',
             variantName: item.variant?.name,
             unitPrice: item.unitPrice,
             quantity: item.quantity,
-            totalPrice: item.totalPrice,
+            totalPrice: isSpoiled ? 0 : item.totalPrice,
             isOnRequest: item.isOnRequest || false,
+            isSpoiled,
+            spoilageRemarks: item.spoilageRemarks || '',
+            spoilageMarkedBy: item.spoilageMarkedBy || '',
             itemType: item.itemType || 'Food',
             taxType: item.taxType,
             taxRate: item.taxRate,
@@ -405,11 +415,18 @@ exports.splitBill = async (req, res) => {
             totalSplits: equalCount,
             splitType: 'Equal'
           },
-          items: parentBill.items.map(it => ({
-            ...it.toObject(),
-            quantity: it.quantity / equalCount,
-            totalPrice: it.totalPrice / equalCount
-          })),
+          items: parentBill.items.map(it => {
+            const isSp = Boolean(it.isSpoiled);
+            return {
+              ...it.toObject(),
+              quantity: it.quantity / equalCount,
+              unitPrice: isSp ? 0 : it.unitPrice,
+              totalPrice: isSp ? 0 : (it.totalPrice / equalCount),
+              isSpoiled: isSp,
+              spoilageRemarks: it.spoilageRemarks || '',
+              spoilageMarkedBy: it.spoilageMarkedBy || ''
+            };
+          }),
           subtotal: Number(equalSubtotal.toFixed(2)),
           cgstAmount: Number(equalCgst.toFixed(2)),
           sgstAmount: Number(equalSgst.toFixed(2)),
@@ -447,15 +464,19 @@ exports.splitBill = async (req, res) => {
           }
 
           if (originalItem) {
+            const isSp = Boolean(originalItem.isSpoiled);
             splitRawItems.push({
               menuItem: originalItem.menuItem,
               foodName: originalItem.foodName,
               variantName: originalItem.variantName,
               unitPrice: originalItem.unitPrice,
               quantity: alloc.quantity || originalItem.quantity,
-              totalPrice: originalItem.unitPrice * (alloc.quantity || originalItem.quantity),
+              totalPrice: isSp ? 0 : (originalItem.unitPrice * (alloc.quantity || originalItem.quantity)),
               isComplimentary: originalItem.isComplimentary,
-              isNonChargeable: originalItem.isNonChargeable
+              isNonChargeable: originalItem.isNonChargeable,
+              isSpoiled: isSp,
+              spoilageRemarks: originalItem.spoilageRemarks || '',
+              spoilageMarkedBy: originalItem.spoilageMarkedBy || ''
             });
           }
         });
@@ -623,15 +644,19 @@ exports.mergeBills = async (req, res) => {
       const parentBillDoc = await Bill.findById(uniqueParentIds[0]);
       if (parentBillDoc && parentBillDoc.items && parentBillDoc.items.length > 0) {
         parentBillDoc.items.forEach(it => {
+          const isSp = Boolean(it.isSpoiled);
           rawMergedItems.push({
             menuItem: it.menuItem,
             foodName: it.foodName,
             variantName: it.variantName,
             unitPrice: it.unitPrice,
             quantity: it.quantity,
-            totalPrice: it.totalPrice,
+            totalPrice: isSp ? 0 : it.totalPrice,
             isComplimentary: it.isComplimentary,
             isNonChargeable: it.isNonChargeable,
+            isSpoiled: isSp,
+            spoilageRemarks: it.spoilageRemarks || '',
+            spoilageMarkedBy: it.spoilageMarkedBy || '',
             taxType: it.taxType,
             taxRate: it.taxRate,
             sectionName: it.sectionName
@@ -655,15 +680,19 @@ exports.mergeBills = async (req, res) => {
         }
 
         b.items.forEach(it => {
+          const isSp = Boolean(it.isSpoiled);
           rawMergedItems.push({
             menuItem: it.menuItem,
             foodName: it.foodName,
             variantName: it.variantName,
             unitPrice: it.unitPrice,
             quantity: it.quantity,
-            totalPrice: it.totalPrice,
+            totalPrice: isSp ? 0 : it.totalPrice,
             isComplimentary: it.isComplimentary,
             isNonChargeable: it.isNonChargeable,
+            isSpoiled: isSp,
+            spoilageRemarks: it.spoilageRemarks || '',
+            spoilageMarkedBy: it.spoilageMarkedBy || '',
             taxType: it.taxType,
             taxRate: it.taxRate,
             sectionName: it.sectionName
@@ -675,11 +704,11 @@ exports.mergeBills = async (req, res) => {
     // Consolidate identical items by combining quantities
     const itemMap = new Map();
     rawMergedItems.forEach(it => {
-      const key = `${it.foodName}||${it.variantName || ''}||${it.unitPrice}||${it.isComplimentary || false}||${it.isNonChargeable || false}`;
+      const key = `${it.foodName}||${it.variantName || ''}||${it.unitPrice}||${it.isComplimentary || false}||${it.isNonChargeable || false}||${it.isSpoiled || false}`;
       if (itemMap.has(key)) {
         const existing = itemMap.get(key);
         existing.quantity += (it.quantity || 1);
-        existing.totalPrice = (existing.isComplimentary || existing.isNonChargeable) ? 0 : existing.unitPrice * existing.quantity;
+        existing.totalPrice = (existing.isSpoiled || existing.isComplimentary || existing.isNonChargeable) ? 0 : existing.unitPrice * existing.quantity;
       } else {
         itemMap.set(key, { ...it, quantity: it.quantity || 1 });
       }
@@ -1253,6 +1282,262 @@ exports.getBillingAnalytics = async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching billing analytics:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Get Comprehensive Daily Sales Report
+// @route   GET /api/v1/billing/daily-sales-report
+// @access  Private
+exports.getDailySalesReport = async (req, res) => {
+  try {
+    const { date, startDate, endDate } = req.query;
+
+    let start = new Date();
+    let end = new Date();
+
+    if (date) {
+      start = new Date(date);
+      start.setHours(0, 0, 0, 0);
+      end = new Date(date);
+      end.setHours(23, 59, 59, 999);
+    } else if (startDate && endDate) {
+      start = new Date(startDate);
+      start.setHours(0, 0, 0, 0);
+      end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+    } else {
+      start.setHours(0, 0, 0, 0);
+      end.setHours(23, 59, 59, 999);
+    }
+
+    const dateFilter = { createdAt: { $gte: start, $lte: end } };
+
+    // Fetch All Bills for the day
+    const bills = await Bill.find(dateFilter)
+      .populate('table')
+      .populate('generatedBy', 'name role email')
+      .populate('ncEmployee', 'name role')
+      .sort({ createdAt: -1 });
+
+    // Fetch Spoilage Records
+    const spoilages = await FoodSpoilage.find(dateFilter).sort({ createdAt: -1 });
+
+    // Fetch Audit Logs for edits, voids, cancellations, discounts, SC removal
+    const auditLogs = await AuditLog.find(dateFilter)
+      .populate('employeeId', 'name role')
+      .sort({ createdAt: -1 });
+
+    // Summary Aggregations
+    let grossSales = 0;
+    let totalDiscounts = 0;
+    let totalNonChargeable = 0;
+    let totalSpoilageValue = 0;
+    let totalServiceCharge = 0;
+    let totalTaxes = 0;
+    let netCollection = 0;
+    let totalBillsCount = bills.length;
+    let voidedBillsCount = 0;
+    let cancelledBillsCount = 0;
+    let serviceChargeRemovalsCount = 0;
+    let serviceChargeRemovedAmount = 0;
+
+    const discountReport = [];
+    const ncReport = [];
+    const modificationLogs = [];
+    const cancellationLogs = [];
+    const scRemovalLogs = [];
+    const spoilageLogs = [];
+
+    // Calculate Spoilage Total
+    spoilages.forEach(s => {
+      totalSpoilageValue += (s.totalLossAmount || 0);
+      spoilageLogs.push({
+        _id: s._id,
+        itemName: s.itemName,
+        quantity: s.quantity,
+        unit: s.unit || 'pcs',
+        totalLossAmount: s.totalLossAmount,
+        spoilageRemarks: s.reason || s.spoilageRemarks || 'Marked spoiled',
+        spoilageMarkedBy: s.recordedByName || 'Staff',
+        timestamp: s.createdAt
+      });
+    });
+
+    bills.forEach(bill => {
+      const isCancelled = bill.status === 'Cancelled' || bill.paymentStatus === 'Cancelled';
+      const isVoided = bill.status === 'Voided' || bill.paymentStatus === 'Voided';
+
+      if (isCancelled) {
+        cancelledBillsCount++;
+        cancellationLogs.push({
+          billNumber: bill.billNumber,
+          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : 'Takeaway/Walk-in',
+          finalAmount: bill.finalAmount,
+          status: 'Cancelled',
+          reason: bill.notes || bill.cancelReason || 'Bill Cancelled',
+          staff: bill.generatedBy?.name || 'Staff',
+          timestamp: bill.updatedAt || bill.createdAt
+        });
+        return;
+      }
+
+      if (isVoided) {
+        voidedBillsCount++;
+        cancellationLogs.push({
+          billNumber: bill.billNumber,
+          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : 'Takeaway/Walk-in',
+          finalAmount: bill.finalAmount,
+          status: 'Voided',
+          reason: bill.notes || bill.voidReason || 'Bill Voided',
+          staff: bill.generatedBy?.name || 'Staff',
+          timestamp: bill.updatedAt || bill.createdAt
+        });
+        return;
+      }
+
+      // Valid Active / Paid / Settled Bill
+      grossSales += (bill.subtotal || 0);
+      totalTaxes += (bill.totalTaxAmount || 0);
+      netCollection += (bill.amountPaid || bill.finalAmount || 0);
+
+      // Discounts
+      const discAmt = (bill.billDiscountAmount || 0) + (bill.itemLevelDiscounts || 0);
+      if (discAmt > 0 || bill.billDiscountType !== 'None') {
+        totalDiscounts += discAmt;
+        discountReport.push({
+          billNumber: bill.billNumber,
+          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : 'Dine-In',
+          subtotal: bill.subtotal,
+          discountType: bill.billDiscountType,
+          discountValue: bill.billDiscountValue,
+          discountAmount: discAmt,
+          reason: bill.billDiscountReason || 'Customer Discount',
+          staff: bill.generatedBy?.name || 'Staff',
+          timestamp: bill.createdAt
+        });
+      }
+
+      // Non-Chargeable / Complimentary
+      if (bill.isNonChargeableBill || bill.isComplimentaryBill || bill.paymentStatus === 'Non-Chargeable') {
+        const ncVal = bill.subtotal || bill.finalAmount || 0;
+        totalNonChargeable += ncVal;
+        ncReport.push({
+          billNumber: bill.billNumber,
+          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : 'Dine-In',
+          type: bill.isComplimentaryBill ? 'Complimentary' : 'Non-Chargeable',
+          value: ncVal,
+          reason: bill.ncStaffRemark || bill.complimentaryBillRemark || 'NC Staff Order',
+          staff: bill.ncEmployee?.name || bill.generatedBy?.name || 'Staff',
+          timestamp: bill.createdAt
+        });
+      }
+
+      // Individual NC / Complimentary Items inside normal bills
+      (bill.items || []).forEach(item => {
+        if (item.isSpoiled) {
+          totalSpoilageValue += (item.unitPrice * item.quantity);
+          spoilageLogs.push({
+            billNumber: bill.billNumber,
+            itemName: item.foodName,
+            quantity: item.quantity,
+            unit: 'pcs',
+            totalLossAmount: (item.unitPrice * item.quantity),
+            spoilageRemarks: item.spoilageRemarks || 'Spoiled dish on bill',
+            spoilageMarkedBy: item.spoilageMarkedBy || 'Staff',
+            timestamp: bill.createdAt
+          });
+        } else if (item.isNonChargeable || item.isComplimentary) {
+          totalNonChargeable += (item.unitPrice * item.quantity);
+          ncReport.push({
+            billNumber: bill.billNumber,
+            tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : 'Dine-In',
+            itemName: item.foodName,
+            type: item.isComplimentary ? 'Item Complimentary' : 'Item NC',
+            value: item.unitPrice * item.quantity,
+            reason: item.ncRemark || item.complimentaryReason || 'Item waived',
+            staff: item.staffEmployeeId || 'Staff',
+            timestamp: bill.createdAt
+          });
+        }
+      });
+
+      // Service Charge Logic
+      if (bill.serviceChargeEnabled === false || bill.serviceChargeRate === 0) {
+        serviceChargeRemovalsCount++;
+        const waivedAmount = (bill.subtotal * 0.05);
+        serviceChargeRemovedAmount += waivedAmount;
+        scRemovalLogs.push({
+          billNumber: bill.billNumber,
+          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : 'Dine-In',
+          subtotal: bill.subtotal,
+          waivedAmount,
+          reason: 'Service Charge Waived/Removed by Staff',
+          staff: bill.generatedBy?.name || 'Staff',
+          timestamp: bill.createdAt
+        });
+      } else {
+        totalServiceCharge += (bill.serviceChargeAmount || 0);
+      }
+
+      // Check Bill Modifications / Splits
+      if (bill.splitInfo?.isSplit) {
+        modificationLogs.push({
+          billNumber: bill.billNumber,
+          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : 'Dine-In',
+          modificationType: `Bill Split (${bill.splitInfo.splitType})`,
+          details: `Split into ${bill.splitInfo.totalSplits} bills`,
+          timestamp: bill.createdAt
+        });
+      }
+    });
+
+    // Also include AuditLog entries for bill modifications & void events
+    auditLogs.forEach(log => {
+      if (log.action && (log.action.includes('Bill') || log.action.includes('Order') || log.action.includes('Discount') || log.action.includes('Void'))) {
+        modificationLogs.push({
+          billNumber: log.entityId || 'N/A',
+          modificationType: log.action,
+          details: log.details || log.description || '',
+          staff: log.employeeId?.name || 'Staff',
+          timestamp: log.createdAt
+        });
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        dateRange: {
+          startDate: start,
+          endDate: end
+        },
+        summary: {
+          grossSales,
+          totalDiscounts,
+          totalNonChargeable,
+          totalSpoilageValue,
+          totalServiceCharge,
+          serviceChargeRemovalsCount,
+          serviceChargeRemovedAmount,
+          totalTaxes,
+          netCollection,
+          totalBillsCount,
+          voidedBillsCount,
+          cancelledBillsCount
+        },
+        reports: {
+          discountReport,
+          ncReport,
+          modificationLogs,
+          cancellationLogs,
+          scRemovalLogs,
+          spoilageLogs
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error generating daily sales report:', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

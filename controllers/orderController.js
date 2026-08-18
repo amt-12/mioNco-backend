@@ -61,9 +61,11 @@ const consolidateActiveTableOrders = async (tableId, sessionId) => {
         }
 
         if (itemsAppended) {
+            masterOrder.markModified('items');
             let subtotal = 0;
             let totalTax = 0;
             masterOrder.items.forEach(i => {
+                if (i.isSpoiled) return;
                 const itemTotal = i.totalPrice || (i.unitPrice * i.quantity) || 0;
                 subtotal += itemTotal;
                 const rate = i.taxRate || (i.itemType === 'Liquor' ? defaultVAT : defaultGST);
@@ -151,14 +153,14 @@ exports.createOrder = async (req, res) => {
         let addedTax = 0;
         const onRequestItemsLogged = [];
 
-        const processedItems = items.map(item => {
+        const processedItems = await Promise.all(items.map(async item => {
             if (item.isOnRequest) {
                 const foodName = item.foodName || item.name || 'On-Request Item';
                 const itemType = item.itemType === 'Liquor' ? 'Liquor' : 'Food';
                 const taxType = item.taxType || (itemType === 'Liquor' ? 'VAT' : 'GST');
                 const taxRate = taxType === 'VAT' ? defaultVAT : defaultGST;
-                const unitPrice = item.unitPrice ?? item.price ?? 0;
-                const quantity = item.quantity || 1;
+                const unitPrice = Number(item.unitPrice ?? item.price ?? 0);
+                const quantity = Number(item.quantity || 1);
                 const totalPrice = unitPrice * quantity;
                 addedSubtotal += totalPrice;
 
@@ -185,33 +187,50 @@ exports.createOrder = async (req, res) => {
                 return processedOnReq;
             }
 
-            let unitPrice = item.menuItem?.basePrice || item.unitPrice || 0;
-            if (item.variant && item.variant.price) unitPrice += item.variant.price;
+            const mId = typeof item.menuItem === 'object' ? item.menuItem?._id : (item.menuItem || item.menuItemId);
+            let menuItemDoc = null;
+            if (mId) {
+                try {
+                    menuItemDoc = await MenuItem.findById(mId);
+                } catch (e) {}
+            }
+
+            let rawPrice = item.unitPrice ?? item.price ?? item.menuItem?.basePrice ?? item.menuItem?.price ?? item.menuItem?.discountedPrice;
+            if ((rawPrice === undefined || rawPrice === null || Number(rawPrice) === 0) && menuItemDoc) {
+                rawPrice = menuItemDoc.basePrice ?? menuItemDoc.discountedPrice ?? menuItemDoc.price ?? 0;
+            }
+
+            let unitPrice = Number(rawPrice || 0);
+
+            if (item.variant && item.variant.price) unitPrice += Number(item.variant.price);
             
             if (item.customizations) {
                 item.customizations.forEach(c => {
-                    if (c.price) unitPrice += c.price;
+                    if (c.price) unitPrice += Number(c.price);
                 });
             }
             
-            const totalPrice = unitPrice * (item.quantity || 1);
+            const quantity = Number(item.quantity || 1);
+            const totalPrice = unitPrice * quantity;
             addedSubtotal += totalPrice;
 
             const itemTax = (totalPrice * defaultGST) / 100;
             addedTax += itemTax;
             
             return {
-                menuItem: item.menuItem?._id || item.menuItem,
+                menuItem: mId || item.menuItem,
                 isOnRequest: false,
+                foodName: menuItemDoc?.foodName || menuItemDoc?.displayName || item.foodName || 'Item',
                 variant: item.variant,
                 customizations: item.customizations,
-                quantity: item.quantity || 1,
+                quantity,
                 unitPrice,
                 totalPrice,
                 notes: item.notes,
+                addedBy: req.user?._id || waiter || null,
                 status: 'Pending'
             };
-        });
+        }));
 
         const addedTotal = Math.round(addedSubtotal + addedTax);
 
@@ -227,6 +246,19 @@ exports.createOrder = async (req, res) => {
         if (existingOrder) {
             // Append items into existing active order for Table T1
             existingOrder.items.push(...processedItems);
+
+            // Heal any 0 price items on existing order items if menuItem doc exists
+            for (let i of existingOrder.items) {
+                if ((!i.unitPrice || i.unitPrice === 0) && i.menuItem) {
+                    try {
+                        const mDoc = await MenuItem.findById(i.menuItem);
+                        if (mDoc) {
+                            i.unitPrice = Number(mDoc.basePrice || mDoc.discountedPrice || 0);
+                            i.totalPrice = i.unitPrice * (i.quantity || 1);
+                        }
+                    } catch (e) {}
+                }
+            }
 
             let subtotal = 0;
             let totalTax = 0;
@@ -250,6 +282,13 @@ exports.createOrder = async (req, res) => {
             if (priority === 'High') {
                 existingOrder.priority = 'High';
             }
+
+            if (waiter) {
+                existingOrder.waiter = waiter;
+            }
+
+            // Always reset status to 'Pending Acceptance' so newly added items land in 'Incoming' on Live KDS
+            existingOrder.status = 'Pending Acceptance';
 
             order = await existingOrder.save();
         } else {
@@ -426,7 +465,8 @@ exports.getOrders = async (req, res) => {
                 path: 'table',
                 populate: { path: 'floor', select: 'name floorNumber slug' }
             })
-            .populate('waiter', 'name')
+            .populate('waiter', 'name email role')
+            .populate('items.addedBy', 'name email role')
             .populate({
                 path: 'items.menuItem',
                 select: 'foodName displayName sku categories'
@@ -462,6 +502,15 @@ exports.updateOrderStatus = async (req, res) => {
         if (status === 'Completed') {
             order.paymentStatus = 'Paid';
             if (!order.paymentMethod) order.paymentMethod = paymentMethod || 'Cash';
+        }
+
+        // If order status is Preparing, mark all pending items as Preparing
+        if (status === 'Preparing') {
+            order.items.forEach(item => {
+                if (!item.status || item.status === 'Pending' || item.status === 'Pending Acceptance') {
+                    item.status = 'Preparing';
+                }
+            });
         }
         
         // If order is cancelled, optionally zero out from session
@@ -555,7 +604,7 @@ exports.updateOrderItemStatus = async (req, res) => {
             i.status === 'Ready' || i.status === 'Served' || i.status === 'Cancelled'
         );
         
-        if (allItemsReadyOrServed && order.status === 'Preparing') {
+        if (allItemsReadyOrServed && order.status !== 'Completed' && order.status !== 'Cancelled') {
             order.status = 'Ready to Serve';
             becameReady = true;
         }
@@ -865,16 +914,37 @@ exports.checkoutOrder = async (req, res) => {
             await order.save();
         }
 
+        // Also mark any pending Service Requests for this table as Completed
+        try {
+            await ServiceRequest.updateMany(
+                { table: queryTableId, status: { $nin: ['Completed', 'Cancelled'] } },
+                { status: 'Completed', resolvedAt: new Date() }
+            );
+        } catch (srErr) {
+            console.error('Error resolving service requests on checkout:', srErr);
+        }
+
         // Free up the table -> Set status to Available
         if (table) {
             table.status = 'Available';
             table.assignedWaiter = null;
             await table.save();
             
+            try {
+                await DiningSession.updateMany(
+                    { table: table._id, status: 'Active' },
+                    { status: 'Completed', endTime: new Date() }
+                );
+            } catch (sessErr) {
+                console.error('Error closing dining session on checkout:', sessErr);
+            }
+
             const io = req.app.get('io');
             if (io) {
                 io.emit('table_status_updated', table);
+                io.emit('table_status_changed', table);
                 io.emit('table_payment_received', { tableId: table._id, tableNumber: table.tableNumber, tableName: table.name });
+                io.emit('table_payment_completed', { tableId: table._id, tableNumber: table.tableNumber, tableName: table.name });
                 for (let order of activeOrders) {
                     io.emit('order_status_updated', order);
                 }
@@ -934,12 +1004,17 @@ exports.addOrderItem = async (req, res) => {
         const itemObj = await MenuItem.findById(menuItemId);
         const price = unitPrice || itemObj?.price?.basePrice || itemObj?.basePrice || 0;
 
+        if (req.body.waiter && !order.waiter) {
+            order.waiter = req.body.waiter;
+        }
+
         order.items.push({
             menuItem: menuItemId,
             quantity,
             unitPrice: price,
             totalPrice: quantity * price,
             notes: notes || '',
+            addedBy: req.user?._id || req.body.waiter || null,
             status: 'Pending'
         });
 
@@ -950,7 +1025,8 @@ exports.addOrderItem = async (req, res) => {
 
         const populatedOrder = await Order.findById(order._id)
             .populate('table')
-            .populate('waiter', 'name')
+            .populate('waiter', 'name email role')
+            .populate('items.addedBy', 'name email role')
             .populate('items.menuItem');
 
         const io = req.app.get('io');
@@ -978,6 +1054,118 @@ exports.getOnRequestAuditLogs = async (req, res) => {
 
         res.status(200).json({ success: true, count: logs.length, data: logs });
     } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// @desc    Get Most Ordered Items per Floor
+// @route   GET /api/v1/orders/popular-by-floor
+// @access  Private
+exports.getPopularItemsByFloor = async (req, res) => {
+    try {
+        const { timeframe } = req.query; // e.g. today, week, month, all
+        let dateQuery = {};
+        if (timeframe === 'today') {
+            const startOfDay = new Date();
+            startOfDay.setHours(0,0,0,0);
+            dateQuery = { createdAt: { $gte: startOfDay } };
+        } else if (timeframe === 'week') {
+            const startOfWeek = new Date();
+            startOfWeek.setDate(startOfWeek.getDate() - 7);
+            dateQuery = { createdAt: { $gte: startOfWeek } };
+        } else if (timeframe === 'month') {
+            const startOfMonth = new Date();
+            startOfMonth.setDate(startOfMonth.getDate() - 30);
+            dateQuery = { createdAt: { $gte: startOfMonth } };
+        }
+
+        const orders = await Order.find({
+            status: { $ne: 'Cancelled' },
+            ...dateQuery
+        })
+        .populate({
+            path: 'table',
+            populate: { path: 'floor' }
+        })
+        .populate('items.menuItem');
+
+        const floors = ['Mio Palazzo', 'Mio Bistro', 'Mio Privè', 'Mio Elite', 'Mio Skybar'];
+        const floorMap = {};
+        floors.forEach(f => {
+            floorMap[f] = {};
+        });
+
+        orders.forEach(order => {
+            const floorName = order.table?.floor?.name || 'Mio Bistro';
+            let matchedFloor = floors.find(f => floorName.toLowerCase().includes(f.toLowerCase())) || 'Mio Bistro';
+
+            if (!floorMap[matchedFloor]) {
+                floorMap[matchedFloor] = {};
+            }
+
+            (order.items || []).forEach(item => {
+                if (item.isSpoiled) return;
+
+                const name = item.foodName || item.menuItem?.foodName || item.menuItem?.displayName || 'Item';
+                const qty = item.quantity || 1;
+                const rev = item.totalPrice || (qty * (item.unitPrice || 0));
+                const category = item.menuItem?.dishType || item.itemType || 'Food';
+
+                if (!floorMap[matchedFloor][name]) {
+                    floorMap[matchedFloor][name] = {
+                        dishName: name,
+                        totalQty: 0,
+                        totalRevenue: 0,
+                        category,
+                        unitPrice: item.unitPrice || 0
+                    };
+                }
+
+                floorMap[matchedFloor][name].totalQty += qty;
+                floorMap[matchedFloor][name].totalRevenue += rev;
+            });
+        });
+
+        const popularByFloor = {};
+        let overallPopularMap = {};
+
+        floors.forEach(f => {
+            const itemsList = Object.values(floorMap[f] || {})
+                .sort((a, b) => b.totalQty - a.totalQty);
+
+            itemsList.forEach((item, idx) => {
+                item.rank = idx + 1;
+                if (!overallPopularMap[item.dishName]) {
+                    overallPopularMap[item.dishName] = {
+                        dishName: item.dishName,
+                        totalQty: 0,
+                        totalRevenue: 0,
+                        category: item.category,
+                        floorsPopularIn: []
+                    };
+                }
+                overallPopularMap[item.dishName].totalQty += item.totalQty;
+                overallPopularMap[item.dishName].totalRevenue += item.totalRevenue;
+                overallPopularMap[item.dishName].floorsPopularIn.push({ floor: f, qty: item.totalQty, rank: item.rank });
+            });
+
+            popularByFloor[f] = itemsList;
+        });
+
+        const overallPopularList = Object.values(overallPopularMap)
+            .sort((a, b) => b.totalQty - a.totalQty)
+            .map((item, idx) => ({ ...item, overallRank: idx + 1 }));
+
+        res.status(200).json({
+            success: true,
+            data: {
+                floors,
+                popularByFloor,
+                overallPopularList
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching popular items by floor:', error);
         res.status(500).json({ success: false, message: error.message });
     }
 };

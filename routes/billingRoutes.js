@@ -14,7 +14,8 @@ const {
   voidBill,
   reprintBill,
   recordPayment,
-  getBillingAnalytics
+  getBillingAnalytics,
+  getDailySalesReport
 } = require('../controllers/billingController');
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
@@ -23,6 +24,7 @@ const router = express.Router();
 
 router.use(protect);
 
+router.get('/daily-sales-report', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), getDailySalesReport);
 router.post('/generate', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), generateBill);
 router.get('/', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), getBills);
 router.get('/analytics/summary', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), getBillingAnalytics);
