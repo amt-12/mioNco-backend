@@ -60,6 +60,7 @@ const SYSTEM_MODULES = [
     children: [
       { id: 'order_dashboard', name: 'Order Dashboard', key: '/orders/dashboard' },
       { id: 'waiter_pos', name: 'Waiter POS', key: '/orders/pos' },
+      { id: 'waiter_punches', name: 'Waiter Punch Stats', key: '/orders/waiter-punches' },
       { id: 'all_orders', name: 'All Orders', key: '/orders/list' },
       { id: 'popular_by_floor', name: 'Most Ordered by Floor', key: '/orders/popular-by-floor' }
     ]
@@ -70,9 +71,8 @@ const SYSTEM_MODULES = [
     icon: 'InboxOutlined',
     key: 'inventory-group',
     children: [
-      { id: 'inventory_dashboard', name: 'Inventory Dashboard', key: '/inventory/dashboard' },
-      { id: 'inventory_items', name: 'Raw Materials & Stock', key: '/inventory/items' },
-      { id: 'inventory_reports', name: 'Item-wise Reports', key: '/inventory/reports' }
+      { id: 'inventory_dashboard', name: 'Raw Materials & Stock', key: '/inventory/dashboard' },
+      { id: 'inventory_kitchen_issues', name: 'Issued Stock to Kitchen', key: '/inventory/kitchen-issues' }
     ]
   },
   {

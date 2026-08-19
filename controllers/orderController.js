@@ -543,26 +543,6 @@ exports.updateOrderStatus = async (req, res) => {
 
         await order.save();
 
-        if (status === 'Ready to Serve') {
-            try {
-                const table = await Table.findById(order.table);
-                if (table) {
-                    const reqDoc = await ServiceRequest.create({
-                        table: table._id,
-                        waiter: table.assignedWaiter || order.waiter,
-                        type: 'Food Ready',
-                        priority: 'High',
-                        order: order._id
-                    });
-                    const io = req.app.get('io');
-                    if (io) {
-                        const populatedReq = await ServiceRequest.findById(reqDoc._id).populate('table', 'tableNumber').populate('waiter', 'name');
-                        io.emit('new_service_request', populatedReq);
-                    }
-                }
-            } catch (err) { console.error('Service request error:', err) }
-        }
-
         const populatedOrder = await Order.findById(order._id)
             .populate('table')
             .populate('waiter', 'name')
@@ -610,26 +590,6 @@ exports.updateOrderItemStatus = async (req, res) => {
         }
 
         await order.save();
-
-        if (becameReady) {
-            try {
-                const table = await Table.findById(order.table);
-                if (table) {
-                    const reqDoc = await ServiceRequest.create({
-                        table: table._id,
-                        waiter: table.assignedWaiter || order.waiter,
-                        type: 'Food Ready',
-                        priority: 'High',
-                        order: order._id
-                    });
-                    const io = req.app.get('io');
-                    if (io) {
-                        const populatedReq = await ServiceRequest.findById(reqDoc._id).populate('table', 'tableNumber').populate('waiter', 'name');
-                        io.emit('new_service_request', populatedReq);
-                    }
-                }
-            } catch (err) { console.error('Service request error:', err) }
-        }
 
         const populatedOrder = await Order.findById(order._id)
             .populate('table')
@@ -718,26 +678,6 @@ exports.rejectItem = async (req, res) => {
         }
         
         await order.save();
-
-        if (becameReady) {
-            try {
-                const table = await Table.findById(order.table);
-                if (table) {
-                    const reqDoc = await ServiceRequest.create({
-                        table: table._id,
-                        waiter: table.assignedWaiter || order.waiter,
-                        type: 'Food Ready',
-                        priority: 'High',
-                        order: order._id
-                    });
-                    const io = req.app.get('io');
-                    if (io) {
-                        const populatedReq = await ServiceRequest.findById(reqDoc._id).populate('table', 'tableNumber').populate('waiter', 'name');
-                        io.emit('new_service_request', populatedReq);
-                    }
-                }
-            } catch (err) { console.error('Service request error:', err) }
-        }
 
         const populatedOrder = await Order.findById(order._id)
             .populate('table')
@@ -1146,7 +1086,12 @@ exports.getPopularItemsByFloor = async (req, res) => {
                 }
                 overallPopularMap[item.dishName].totalQty += item.totalQty;
                 overallPopularMap[item.dishName].totalRevenue += item.totalRevenue;
-                overallPopularMap[item.dishName].floorsPopularIn.push({ floor: f, qty: item.totalQty, rank: item.rank });
+                overallPopularMap[item.dishName].floorsPopularIn.push({ 
+                    floor: f, 
+                    qty: item.totalQty, 
+                    rank: item.rank,
+                    revenue: item.totalRevenue 
+                });
             });
 
             popularByFloor[f] = itemsList;

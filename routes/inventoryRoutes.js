@@ -10,7 +10,8 @@ const {
   deleteInventoryItem,
   assignStockToFloor,
   getFloorAssignments,
-  returnFloorStock
+  returnFloorStock,
+  recordStationConsumption
 } = require('../controllers/inventoryController');
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
@@ -25,6 +26,7 @@ router.post('/transaction', authorize('Super Admin', 'super_admin', 'admin', 'Re
 
 router.post('/assign-floor', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Inventory Manager', 'Chef'), assignStockToFloor);
 router.get('/floor-assignments', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Inventory Manager', 'Chef'), getFloorAssignments);
+router.post('/floor-assignments/:id/consume', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Inventory Manager', 'Chef'), recordStationConsumption);
 router.delete('/floor-assignments/:id', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), returnFloorStock);
 
 router.route('/')

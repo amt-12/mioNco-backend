@@ -15,6 +15,7 @@ const inventoryItemSchema = new mongoose.Schema({
     required: [true, 'Please select a category'],
     enum: [
       'Dry Stock',
+      'Soft Drinks',
       'Produce & Fresh',
       'Meat & Poultry',
       'Seafood',

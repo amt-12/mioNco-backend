@@ -1165,6 +1165,7 @@ exports.recordPayment = async (req, res) => {
         amount: amt,
         txnId: p.txnId || '',
         cardType: p.cardType || '',
+        receiptImage: p.receiptImage || '',
         timestamp: new Date()
       });
     });

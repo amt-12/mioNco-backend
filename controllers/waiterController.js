@@ -44,7 +44,8 @@ exports.getActiveWaiters = async (req, res) => {
         const tables = await Table.find().populate('floor', 'name');
         
         const activeRequests = await ServiceRequest.find({
-            status: { $in: ['Pending', 'Acknowledged'] }
+            status: { $in: ['Pending', 'Acknowledged'] },
+            type: { $ne: 'Food Ready' }
         }).populate({
             path: 'table',
             populate: { path: 'floor' }
@@ -237,7 +238,13 @@ exports.updateRequestStatus = async (req, res) => {
             req.params.id,
             updateData,
             { new: true, runValidators: true }
-        ).populate('table', 'tableNumber name').populate('waiter', 'name').populate('order', 'orderId');
+        )
+        .populate({
+            path: 'table',
+            populate: { path: 'floor' }
+        })
+        .populate('waiter', 'name role email phoneNumber')
+        .populate('order', 'orderId');
 
         if (!request) return res.status(404).json({ success: false, message: 'Request not found' });
 
@@ -315,18 +322,31 @@ exports.updateRequestStatus = async (req, res) => {
 // @access  Private (Waiter)
 exports.getMyTasks = async (req, res) => {
     try {
-        // Find tasks assigned to this waiter, or unassigned tasks (for pooling)
-        const tasks = await ServiceRequest.find({
-            $or: [
-                { waiter: req.user.id },
-                { waiter: { $exists: false } },
-                { waiter: null }
-            ],
-            status: { $in: ['Pending', 'Acknowledged'] }
-        })
-        .populate('table', 'tableNumber floor')
-        .populate('order', 'orderId')
-        .sort({ createdAt: -1 });
+        // Automatically purge any Food Ready requests
+        await ServiceRequest.deleteMany({ type: 'Food Ready' });
+
+        const isManagerOrAdmin = ['Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter Manager'].includes(req.user?.role);
+        const showAll = req.query?.all === 'true' || isManagerOrAdmin;
+        const query = showAll
+            ? { status: { $in: ['Pending', 'Acknowledged'] }, type: { $ne: 'Food Ready' } }
+            : {
+                $or: [
+                    { waiter: req.user.id },
+                    { waiter: { $exists: false } },
+                    { waiter: null }
+                ],
+                status: { $in: ['Pending', 'Acknowledged'] },
+                type: { $ne: 'Food Ready' }
+              };
+
+        const tasks = await ServiceRequest.find(query)
+            .populate({
+                path: 'table',
+                populate: { path: 'floor' }
+            })
+            .populate('waiter', 'name role email phoneNumber')
+            .populate('order', 'orderId')
+            .sort({ createdAt: -1 });
 
         res.status(200).json({ success: true, data: tasks });
     } catch (error) {

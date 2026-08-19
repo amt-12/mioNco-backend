@@ -17,7 +17,7 @@ const billItemSchema = new mongoose.Schema({
   quantity: {
     type: Number,
     required: true,
-    min: 1
+    min: 0
   },
   totalPrice: {
     type: Number,
@@ -121,6 +121,7 @@ const billSchema = new mongoose.Schema({
     amount: { type: Number, required: true },
     txnId: String,
     cardType: String,
+    receiptImage: String,
     timestamp: { type: Date, default: Date.now }
   }],
   amountPaid: { type: Number, default: 0 },
