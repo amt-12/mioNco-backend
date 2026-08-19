@@ -208,6 +208,34 @@ exports.generateBill = async (req, res) => {
   try {
     const { orderId, orderIds, sessionId, tableId, customer } = req.body;
 
+    // Check if active bill(s) already exist for the given order or table
+    let existingQuery = null;
+    if (orderId) {
+      existingQuery = { orders: orderId, status: 'Active' };
+    } else if (orderIds && Array.isArray(orderIds) && orderIds.length > 0) {
+      existingQuery = { orders: { $in: orderIds }, status: 'Active' };
+    } else if (tableId) {
+      existingQuery = { table: tableId, status: 'Active' };
+    }
+
+    if (existingQuery) {
+      const existingBills = await Bill.find(existingQuery)
+        .populate('table')
+        .populate('session')
+        .populate('orders')
+        .populate('createdBy', 'name role')
+        .sort({ createdAt: -1 });
+
+      if (existingBills.length > 0) {
+        return res.status(200).json({
+          success: true,
+          message: 'Active bill(s) already exist',
+          data: existingBills[0],
+          allBills: existingBills
+        });
+      }
+    }
+
     let targetOrders = [];
     if (orderId) {
       const ord = await Order.findById(orderId).populate('items.menuItem');
@@ -310,11 +338,15 @@ exports.generateBill = async (req, res) => {
 // @access  Private
 exports.getBills = async (req, res) => {
   try {
-    const { status, paymentStatus, search, page = 1, limit = 50 } = req.query;
+    const { status, paymentStatus, search, page = 1, limit = 50, table, order, session, isSplit } = req.query;
 
     const query = {};
     if (status && status !== 'ALL') query.status = status;
     if (paymentStatus && paymentStatus !== 'ALL') query.paymentStatus = paymentStatus;
+    if (table) query.table = table;
+    if (order) query.orders = order;
+    if (session) query.session = session;
+    if (isSplit !== undefined) query['splitInfo.isSplit'] = isSplit === 'true';
     if (search) {
       query.$or = [
         { billNumber: { $regex: search, $options: 'i' } },
@@ -363,7 +395,7 @@ exports.getBillById = async (req, res) => {
       .populate('cancellationDetails.cancelledBy', 'name role');
 
     if (!bill) {
-      return res.status(404).json({ success: false, message: 'Bill not found' });
+      return res.status(404).json({ success: false, message: 'Parent bill not found' });
     }
 
     return res.json({ success: true, data: bill });
@@ -379,17 +411,35 @@ exports.getBillById = async (req, res) => {
 exports.splitBill = async (req, res) => {
   try {
     const { splitCount = 2, splitType = 'Equal', itemAllocations } = req.body;
-    const parentBill = await Bill.findById(req.params.id);
+    let targetBill = await Bill.findById(req.params.id);
 
-    if (!parentBill) {
+    if (!targetBill) {
       return res.status(404).json({ success: false, message: 'Parent bill not found' });
     }
 
-    if (parentBill.paymentStatus === 'Paid') {
+    if (targetBill.paymentStatus === 'Paid') {
       return res.status(400).json({ success: false, message: 'Cannot split an already settled bill' });
     }
 
+    // If targetBill is already a child split bill, find the original root parent bill to avoid splitting fractional items
+    let parentBill = targetBill;
+    if (targetBill.splitInfo?.isSplit && targetBill.splitInfo?.parentBill) {
+      const rootBill = await Bill.findById(targetBill.splitInfo.parentBill);
+      if (rootBill) {
+        parentBill = rootBill;
+      }
+    }
+
+    // Clean up any unpaid prior child splits belonging to this parent/order to avoid stale duplicates
+    await Bill.deleteMany({
+      $or: [
+        { 'splitInfo.parentBill': parentBill._id, paymentStatus: { $ne: 'Paid' } },
+        { _id: targetBill._id, paymentStatus: { $ne: 'Paid' }, 'splitInfo.isSplit': true }
+      ]
+    });
+
     const createdSplitBills = [];
+    const freshBasePrefix = await generateBillNumber();
 
     if (splitType === 'Equal' || !itemAllocations || !Array.isArray(itemAllocations) || itemAllocations.length === 0) {
       const equalCount = Math.max(2, parseInt(splitCount) || 2);
@@ -401,9 +451,8 @@ exports.splitBill = async (req, res) => {
       const equalFinal = parentBill.finalAmount / equalCount;
 
       for (let i = 1; i <= equalCount; i++) {
-        const splitNum = await generateBillNumber();
         const splitBill = await Bill.create({
-          billNumber: `${splitNum}-S${i}`,
+          billNumber: `${freshBasePrefix}-S${i}`,
           orders: parentBill.orders,
           session: parentBill.session,
           table: parentBill.table,
@@ -417,11 +466,13 @@ exports.splitBill = async (req, res) => {
           },
           items: parentBill.items.map(it => {
             const isSp = Boolean(it.isSpoiled);
+            const origQty = it.quantity || 1;
+            const splitQty = Number((origQty / equalCount).toFixed(2));
             return {
               ...it.toObject(),
-              quantity: it.quantity / equalCount,
+              quantity: splitQty,
               unitPrice: isSp ? 0 : it.unitPrice,
-              totalPrice: isSp ? 0 : (it.totalPrice / equalCount),
+              totalPrice: isSp ? 0 : Number(((it.unitPrice || 0) * splitQty).toFixed(2)),
               isSpoiled: isSp,
               spoilageRemarks: it.spoilageRemarks || '',
               spoilageMarkedBy: it.spoilageMarkedBy || ''
@@ -488,9 +539,8 @@ exports.splitBill = async (req, res) => {
             customServiceChargeRate: parentBill.serviceChargeRate
           });
 
-          const splitNum = await generateBillNumber();
           const splitBill = await Bill.create({
-            billNumber: `${splitNum}-S${i}`,
+            billNumber: `${freshBasePrefix}-S${i}`,
             orders: parentBill.orders,
             session: parentBill.session,
             table: parentBill.table,
@@ -523,17 +573,21 @@ exports.splitBill = async (req, res) => {
       }
     }
 
-    // Populate created split bills with table details
-    const populatedSplits = await Bill.find({ 'splitInfo.parentBill': parentBill._id }).populate('table');
-
-    // Mark original parent bill status
+    // Mark original root parent bill status as Voided
     parentBill.status = 'Voided';
-    parentBill.notes = `Split into ${populatedSplits.length} child bills`;
+    parentBill.notes = `Split into ${createdSplitBills.length} child bills`;
     await parentBill.save();
+
+    // Populate created split bills with table details
+    const populatedSplits = await Bill.find({ 'splitInfo.parentBill': parentBill._id, status: 'Active' })
+      .populate('table')
+      .populate('session')
+      .populate('orders')
+      .populate('createdBy', 'name role');
 
     return res.json({
       success: true,
-      message: `Bill split successfully into ${populatedSplits.length} bills`,
+      message: `Bill split successfully into ${populatedSplits.length || createdSplitBills.length} bills`,
       data: populatedSplits.length > 0 ? populatedSplits : createdSplitBills
     });
   } catch (error) {
@@ -994,12 +1048,66 @@ exports.toggleTaxAndServiceCharge = async (req, res) => {
     bill.sgstAmount = calculated.sgstAmount;
     bill.vatAmount = calculated.vatAmount;
     bill.totalTaxAmount = calculated.totalTaxAmount;
+    bill.serviceChargeRate = calculated.serviceChargeRate;
     bill.serviceChargeAmount = calculated.serviceChargeAmount;
     bill.finalAmount = calculated.finalAmount;
     bill.balanceDue = Math.max(0, calculated.finalAmount - bill.amountPaid);
 
     await bill.save();
-    return res.json({ success: true, message: 'Charges updated', data: bill });
+
+    let allSplits = [];
+    // If part of split bills, also update sibling active split bills for consistent table tax settings
+    if (bill.splitInfo?.isSplit && bill.splitInfo?.parentBill) {
+      const siblings = await Bill.find({
+        'splitInfo.parentBill': bill.splitInfo.parentBill,
+        _id: { $ne: bill._id },
+        status: 'Active'
+      });
+
+      for (const sib of siblings) {
+        if (typeof taxesEnabled === 'boolean') sib.taxesEnabled = taxesEnabled;
+        if (typeof serviceChargeEnabled === 'boolean') sib.serviceChargeEnabled = serviceChargeEnabled;
+        if (typeof serviceChargeRate === 'number') sib.serviceChargeRate = serviceChargeRate;
+
+        const sibCalc = await calculateBillTotals(sib.items, {
+          taxesEnabled: sib.taxesEnabled,
+          serviceChargeEnabled: sib.serviceChargeEnabled,
+          customServiceChargeRate: sib.serviceChargeRate,
+          discountType: sib.billDiscountType,
+          discountValue: sib.billDiscountValue,
+          isComplimentaryBill: sib.isComplimentaryBill,
+          isNonChargeableBill: sib.isNonChargeableBill
+        });
+
+        sib.cgstAmount = sibCalc.cgstAmount;
+        sib.sgstAmount = sibCalc.sgstAmount;
+        sib.vatAmount = sibCalc.vatAmount;
+        sib.totalTaxAmount = sibCalc.totalTaxAmount;
+        sib.serviceChargeRate = sibCalc.serviceChargeRate;
+        sib.serviceChargeAmount = sibCalc.serviceChargeAmount;
+        sib.finalAmount = sibCalc.finalAmount;
+        sib.balanceDue = Math.max(0, sibCalc.finalAmount - sib.amountPaid);
+        await sib.save();
+      }
+
+      allSplits = await Bill.find({
+        'splitInfo.parentBill': bill.splitInfo.parentBill,
+        status: 'Active'
+      }).populate('table').populate('session').populate('orders').populate('createdBy', 'name role');
+    }
+
+    const populatedBill = await Bill.findById(bill._id)
+      .populate('table')
+      .populate('session')
+      .populate('orders')
+      .populate('createdBy', 'name role');
+
+    return res.json({
+      success: true,
+      message: 'Charges updated',
+      data: populatedBill,
+      allSplits: allSplits.length > 0 ? allSplits : [populatedBill]
+    });
   } catch (error) {
     console.error('Error toggling charges:', error);
     return res.status(500).json({ success: false, message: error.message });
