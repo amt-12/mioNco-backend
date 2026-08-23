@@ -12,7 +12,8 @@ const MenuSectionSchema = new mongoose.Schema({
     description: String,
   },
   floorAvailability: [{ type: String }],
-  floors: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Floor' }]
+  floors: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Floor' }],
+  defaultPrinter: { type: String, default: '' }
 }, { timestamps: true });
 
 module.exports = mongoose.model('MenuSection', MenuSectionSchema);

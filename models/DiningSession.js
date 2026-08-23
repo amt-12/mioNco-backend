@@ -9,7 +9,7 @@ const diningSessionSchema = new mongoose.Schema({
     table: {
         type: mongoose.Schema.ObjectId,
         ref: 'Table',
-        required: true
+        required: false
     },
     floor: {
         type: mongoose.Schema.ObjectId,

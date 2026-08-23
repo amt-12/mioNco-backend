@@ -92,57 +92,62 @@ exports.createOrder = async (req, res) => {
     try {
         const { tableId, floorId, items, source, waiter, priority, customerNotes } = req.body;
 
-        if (!tableId || !items || items.length === 0) {
-            return res.status(400).json({ success: false, message: 'Table and items are required' });
+        if (!items || items.length === 0) {
+            return res.status(400).json({ success: false, message: 'Cart items are required' });
         }
 
         const mongoose = require('mongoose');
         let targetTable = null;
-        if (mongoose.Types.ObjectId.isValid(tableId)) {
-            targetTable = await Table.findById(tableId);
-        }
-        if (!targetTable) {
-            targetTable = await Table.findOne({
-                $or: [
-                    { tableNumber: tableId },
-                    { tableNumber: tableId.toString().replace(/^t/i, '') },
-                    { name: tableId },
-                    { qrSlug: tableId }
-                ]
-            });
+        let validTableId = null;
+        let session = null;
+
+        if (tableId) {
+            if (mongoose.Types.ObjectId.isValid(tableId)) {
+                targetTable = await Table.findById(tableId);
+            }
+            if (!targetTable) {
+                targetTable = await Table.findOne({
+                    $or: [
+                        { tableNumber: tableId },
+                        { tableNumber: tableId.toString().replace(/^t/i, '') },
+                        { name: tableId },
+                        { qrSlug: tableId }
+                    ]
+                });
+            }
+
+            validTableId = targetTable ? targetTable._id : tableId;
+
+            // 1. Find or create Active Dining Session for this table
+            session = await DiningSession.findOne({ table: validTableId, status: 'Active' });
         }
 
-        const validTableId = targetTable ? targetTable._id : tableId;
-
-        // 1. Find or create Active Dining Session for this table
-        let session = await DiningSession.findOne({ table: validTableId, status: 'Active' });
-        
         if (!session) {
             const sessionId = await generateId('SESS', DiningSession);
             session = await DiningSession.create({
                 sessionId,
-                table: validTableId,
-                floor: floorId || targetTable?.floor,
+                table: validTableId || null,
+                floor: floorId || targetTable?.floor || null,
                 waiter,
                 status: 'Active',
                 startTime: new Date()
             });
         }
 
-        // Mark table as Occupied and emit real-time status
-        if (targetTable) {
-            targetTable.status = 'Occupied';
-            await targetTable.save();
+            // Mark table as Occupied and emit real-time status
+            if (targetTable) {
+                targetTable.status = 'Occupied';
+                await targetTable.save();
 
-            const io = req.app.get('io');
-            if (io) {
-                const populatedTable = await Table.findById(targetTable._id)
-                    .populate('assignedWaiter', 'name')
-                    .populate('mergedWith', 'tableNumber');
-                io.emit('table_status_changed', populatedTable);
-                io.emit('table_status_updated', populatedTable);
+                const io = req.app.get('io');
+                if (io) {
+                    const populatedTable = await Table.findById(targetTable._id)
+                        .populate('assignedWaiter', 'name')
+                        .populate('mergedWith', 'tableNumber');
+                    io.emit('table_status_changed', populatedTable);
+                    io.emit('table_status_updated', populatedTable);
+                }
             }
-        }
 
         // 2. Calculate totals & process items
         const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
@@ -235,16 +240,19 @@ exports.createOrder = async (req, res) => {
         const addedTotal = Math.round(addedSubtotal + addedTax);
 
         // 3. Find existing active order or create new master order for this table
-        let existingOrder = await Order.findOne({
-            table: validTableId,
-            session: session._id,
-            status: { $nin: ['Completed', 'Cancelled'] }
-        }).sort({ createdAt: 1 });
+        let existingOrder = null;
+        if (validTableId && session) {
+            existingOrder = await Order.findOne({
+                table: validTableId,
+                session: session._id,
+                status: { $nin: ['Completed', 'Cancelled'] }
+            }).sort({ createdAt: 1 });
+        }
 
         let order;
 
         if (existingOrder) {
-            // Append items into existing active order for Table T1
+            // Append items into existing active order for Table
             existingOrder.items.push(...processedItems);
 
             // Heal any 0 price items on existing order items if menuItem doc exists
@@ -297,22 +305,24 @@ exports.createOrder = async (req, res) => {
             const orderId = await generateId('ORD', Order);
             order = await Order.create({
                 orderId,
-                session: session._id,
-                table: validTableId,
-                source,
-                waiter: waiter || req.user?._id,
+                session: session ? session._id : null,
+                table: validTableId || null,
+                source: source || 'Waiter POS',
+                waiter: waiter || req.user?._id || null,
                 items: processedItems,
                 status: 'Pending Acceptance',
-                priority,
+                priority: priority || 'Normal',
                 subtotal: Number(addedSubtotal.toFixed(2)),
                 tax,
                 total,
-                customerNotes
+                customerNotes: customerNotes || ''
             });
         }
 
-        // Also clean up any legacy duplicate active orders for this table
-        await consolidateActiveTableOrders(validTableId, session._id);
+        // Also clean up any legacy duplicate active orders for this table if session exists
+        if (validTableId && session) {
+            await consolidateActiveTableOrders(validTableId, session._id);
+        }
 
         // 3b. Log Audit Log entries for any On-Request Items added
         if (onRequestItemsLogged.length > 0) {

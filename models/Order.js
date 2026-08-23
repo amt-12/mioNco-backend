@@ -83,7 +83,7 @@ const orderSchema = new mongoose.Schema({
     session: {
         type: mongoose.Schema.ObjectId,
         ref: 'DiningSession',
-        required: true
+        required: false
     },
     table: {
         type: mongoose.Schema.ObjectId,
