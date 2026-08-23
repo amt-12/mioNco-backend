@@ -512,6 +512,15 @@ exports.updateOrderStatus = async (req, res) => {
                 }
             });
         }
+
+        // If order status is Ready to Serve, mark all items as Ready
+        if (status === 'Ready to Serve' || status === 'Ready') {
+            order.items.forEach(item => {
+                if (item.status !== 'Cancelled') {
+                    item.status = 'Ready';
+                }
+            });
+        }
         
         // If order is cancelled, optionally zero out from session
         if (status === 'Cancelled') {
@@ -571,7 +580,21 @@ exports.updateOrderItemStatus = async (req, res) => {
         const order = await Order.findById(orderId);
         if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-        const item = order.items.id(itemId);
+        let item = null;
+        if (itemId) {
+            item = order.items.id(itemId);
+            if (!item) {
+                item = order.items.find(i => String(i._id) === String(itemId) || String(i.id) === String(itemId));
+            }
+            if (!item && !isNaN(Number(itemId))) {
+                const idx = parseInt(itemId, 10);
+                if (order.items[idx]) item = order.items[idx];
+            }
+        }
+        if (!item && req.body.foodName) {
+            item = order.items.find(i => (i.foodName === req.body.foodName || i.menuItem?.foodName === req.body.foodName || i.menuItem?.displayName === req.body.foodName) && i.status !== 'Served');
+        }
+
         if (!item) return res.status(404).json({ success: false, message: 'Item not found in order' });
 
         item.status = status;

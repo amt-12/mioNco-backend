@@ -226,9 +226,10 @@ exports.getTableRequests = async (req, res) => {
 
 exports.updateRequestStatus = async (req, res) => {
     try {
-        const { status } = req.body;
+        const { status, receiptNumber } = req.body;
         
         const updateData = { status };
+        if (receiptNumber) updateData.receiptNumber = receiptNumber;
         if (status === 'Completed' || status === 'Cancelled') {
             updateData.resolvedAt = new Date();
             updateData.resolvedBy = req.user.id;

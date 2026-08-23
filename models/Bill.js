@@ -81,6 +81,14 @@ const billSchema = new mongoose.Schema({
     totalSplits: { type: Number, default: 1 },
     splitType: { type: String, enum: ['Equal', 'Itemized', 'None'], default: 'None' }
   },
+  mergedBillsList: [{
+    billNumber: String,
+    tableNumber: String,
+    floorName: String,
+    items: [billItemSchema],
+    subtotal: { type: Number, default: 0 },
+    finalAmount: { type: Number, default: 0 }
+  }],
   items: [billItemSchema],
   subtotal: { type: Number, default: 0 },
   itemLevelDiscounts: { type: Number, default: 0 },
@@ -89,6 +97,7 @@ const billSchema = new mongoose.Schema({
   billDiscountValue: { type: Number, default: 0 },
   billDiscountAmount: { type: Number, default: 0 },
   billDiscountReason: String,
+  discountGivenBy: String,
   
   isComplimentaryBill: { type: Boolean, default: false },
   complimentaryBillRemark: String,
@@ -117,7 +126,7 @@ const billSchema = new mongoose.Schema({
     default: 'Pending'
   },
   payments: [{
-    mode: { type: String, enum: ['Cash', 'Card', 'UPI', 'Other'], default: 'Cash' },
+    mode: { type: String, enum: ['Cash', 'Card', 'UPI', 'NC', 'Non-Chargeable', 'Other'], default: 'Cash' },
     amount: { type: Number, required: true },
     txnId: String,
     cardType: String,

@@ -32,6 +32,9 @@ const serviceRequestSchema = new mongoose.Schema({
     notes: {
         type: String // E.g., customer custom message
     },
+    receiptNumber: {
+        type: String
+    },
     resolvedAt: {
         type: Date
     },
