@@ -90,7 +90,8 @@ const consolidateActiveTableOrders = async (tableId, sessionId) => {
 // @access  Private
 exports.createOrder = async (req, res) => {
     try {
-        const { tableId, floorId, items, source, waiter, priority, customerNotes } = req.body;
+        const { tableId, floorId, items, source, waiter, priority, customerNotes, pax, guests, paxCount } = req.body;
+        const resolvedPax = Math.max(1, Number(pax || guests || paxCount || 1));
 
         if (!items || items.length === 0) {
             return res.status(400).json({ success: false, message: 'Cart items are required' });
@@ -130,8 +131,12 @@ exports.createOrder = async (req, res) => {
                 floor: floorId || targetTable?.floor || null,
                 waiter,
                 status: 'Active',
+                guests: resolvedPax,
                 startTime: new Date()
             });
+        } else if (pax || guests || paxCount) {
+            session.guests = resolvedPax;
+            await session.save();
         }
 
             // Mark table as Occupied and emit real-time status
@@ -295,6 +300,10 @@ exports.createOrder = async (req, res) => {
                 existingOrder.waiter = waiter;
             }
 
+            if (resolvedPax) {
+                existingOrder.pax = resolvedPax;
+            }
+
             // Always reset status to 'Pending Acceptance' so newly added items land in 'Incoming' on Live KDS
             existingOrder.status = 'Pending Acceptance';
 
@@ -312,6 +321,7 @@ exports.createOrder = async (req, res) => {
                 items: processedItems,
                 status: 'Pending Acceptance',
                 priority: priority || 'Normal',
+                pax: resolvedPax,
                 subtotal: Number(addedSubtotal.toFixed(2)),
                 tax,
                 total,

@@ -109,6 +109,10 @@ const orderSchema = new mongoose.Schema({
         enum: ['Normal', 'High Priority', 'VIP', 'Urgent', 'Chef Priority'],
         default: 'Normal'
     },
+    pax: {
+        type: Number,
+        default: 1
+    },
     subtotal: {
         type: Number,
         default: 0

@@ -1,5 +1,5 @@
 const express = require('express');
-const { getFloors, createFloor, updateFloor, deleteFloor } = require('../controllers/floorController');
+const { getFloors, createFloor, updateFloor, deleteFloor, getFloorFootfallAnalytics } = require('../controllers/floorController');
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
 
@@ -15,6 +15,8 @@ router.use('/:floorId/tables', tableRouter);
 router.get('/public', getFloors);
 
 router.use(protect);
+
+router.get('/footfall', getFloorFootfallAnalytics);
 
 router
   .route('/')
