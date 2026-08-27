@@ -11,8 +11,9 @@ const router = express.Router();
 // Re-route into other resource routers
 router.use('/:floorId/tables', tableRouter);
 
-// Public route for website reservations & floor selection
+// Public route for website reservations & floor selection & footfall analytics
 router.get('/public', getFloors);
+router.get('/footfall/public', getFloorFootfallAnalytics);
 
 router.use(protect);
 
