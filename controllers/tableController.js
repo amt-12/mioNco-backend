@@ -452,3 +452,66 @@ exports.verifyReservedTablePhone = async (req, res, next) => {
     }
 };
 
+// @desc    Update Table Pax / Guest Footfall Count
+// @route   PUT /api/v1/tables/:id/pax
+// @access  Private
+exports.updateTablePax = async (req, res, next) => {
+    try {
+        const { pax, guests } = req.body;
+        const paxCount = Math.max(1, Number(pax || guests || 1));
+        const tableId = req.params.id;
+
+        const DiningSession = require('../models/DiningSession');
+        const Order = require('../models/Order');
+        const generateId = require('../utils/generateId');
+
+        const table = await Table.findById(tableId);
+        if (!table) {
+            return res.status(404).json({ success: false, message: 'Table not found' });
+        }
+
+        // 1. Find active session or create new one
+        let session = await DiningSession.findOne({ table: tableId, status: 'Active' });
+        if (!session) {
+            const sessionId = await generateId('SESS', DiningSession);
+            session = await DiningSession.create({
+                sessionId,
+                table: tableId,
+                floor: table.floor,
+                waiter: req.user?._id || table.assignedWaiter || null,
+                status: 'Active',
+                guests: paxCount,
+                startTime: new Date()
+            });
+        } else {
+            session.guests = paxCount;
+            await session.save();
+        }
+
+        // 2. Update active order if exists
+        const activeOrder = await Order.findOne({
+            table: tableId,
+            session: session._id,
+            status: { $nin: ['Completed', 'Cancelled'] }
+        });
+        if (activeOrder) {
+            activeOrder.pax = paxCount;
+            await activeOrder.save();
+        }
+
+        // Emit real-time update
+        const io = req.app.get('io');
+        if (io) {
+            io.emit('table_pax_updated', { tableId, pax: paxCount, sessionId: session._id });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: `Table Pax / Footfall updated to ${paxCount} guests!`,
+            data: { tableId, pax: paxCount, session }
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+

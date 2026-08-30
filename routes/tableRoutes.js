@@ -2,8 +2,10 @@ const express = require('express');
 const { 
   getTables, createTable, updateTable, deleteTable, 
   updateTableStatus, updateTablePosition, getTableKPIs,
-  verifyTable, occupyTablePublic, freeTablePublic, verifyReservedTablePhone
+  verifyTable, occupyTablePublic, freeTablePublic, verifyReservedTablePhone,
+  updateTablePax
 } = require('../controllers/tableController');
+
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
 
@@ -33,6 +35,7 @@ router
   .delete(authorize('Super Admin', 'super_admin'), deleteTable);
 
 router.put('/:id/status', updateTableStatus);
+router.put('/:id/pax', updateTablePax);
 router.put('/:id/position', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), updateTablePosition);
 
 module.exports = router;
