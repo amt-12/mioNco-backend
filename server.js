@@ -16,7 +16,7 @@ app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(cors({
   origin: [
     'http://localhost:5173',
-    'http://192.168.0.89:5173',
+    'http://192.168.0.62:5173',
     'http://localhost:8080',
     'http://127.0.0.1:8080',
     'http://localhost:8081',
@@ -60,7 +60,7 @@ const io = new Server(server, {
   cors: {
     origin: [
       'http://localhost:5173',
-      'http://192.168.0.89:5173',
+      'http://192.168.0.62:5173',
       'http://localhost:8080',
       'http://127.0.0.1:8080',
       'http://localhost:8081',
