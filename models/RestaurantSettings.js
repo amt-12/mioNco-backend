@@ -103,7 +103,7 @@ const restaurantSettingsSchema = new mongoose.Schema({
         gstEnabled: { type: Boolean, default: true },
         vatEnabled: { type: Boolean, default: true },
         defaultGSTPercent: { type: Number, default: 5 },
-        defaultVATPercent: { type: Number, default: 20 },
+        defaultVATPercent: { type: Number, default: 18.9 },
         enableOTPForSensitiveActions: { type: Boolean, default: false }
     },
     updatedBy: {

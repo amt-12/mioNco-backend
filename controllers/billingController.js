@@ -71,7 +71,7 @@ const calculateBillTotals = async (rawItems, options = {}) => {
   const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
   const defaultServiceRate = settings?.taxSettings?.serviceChargeRate ?? 5;
   const globalGstRate = settings?.taxSettings?.defaultGSTPercent ?? 5;
-  const globalVatRate = settings?.taxSettings?.defaultVATPercent ?? 20;
+  const globalVatRate = settings?.taxSettings?.defaultVATPercent ?? 18.9;
 
   const serviceChargeRate = customServiceChargeRate ?? defaultServiceRate;
 

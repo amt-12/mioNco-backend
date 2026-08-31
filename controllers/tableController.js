@@ -213,13 +213,34 @@ exports.verifyTable = async (req, res, next) => {
             return res.status(200).json({ 
                 success: true, 
                 isReserved: true,
+                isOccupied: false,
                 message: 'This table is currently reserved.',
                 data: {
                     tableId: table._id,
                     tableNumber: table.tableNumber,
                     floorSlug: floorSlug,
                     floorName: floorName,
-                    isReserved: true
+                    isReserved: true,
+                    isOccupied: false
+                }
+            });
+        }
+
+        // Check if table is already Occupied or Billed
+        if (table.status === 'Occupied' || table.status === 'Billed') {
+            return res.status(200).json({ 
+                success: true, 
+                isReserved: false,
+                isOccupied: true,
+                message: 'Table is already booked / occupied.',
+                data: {
+                    tableId: table._id,
+                    tableNumber: table.tableNumber,
+                    floorSlug: floorSlug,
+                    floorName: floorName,
+                    isReserved: false,
+                    isOccupied: true,
+                    status: table.status
                 }
             });
         }
@@ -248,12 +269,14 @@ exports.verifyTable = async (req, res, next) => {
         res.status(200).json({ 
             success: true, 
             isReserved: false,
+            isOccupied: false,
             data: {
                 tableId: table._id,
                 tableNumber: table.tableNumber,
                 floorSlug: floorSlug,
                 floorName: floorName,
-                isReserved: false
+                isReserved: false,
+                isOccupied: false
             }
         });
     } catch (error) {

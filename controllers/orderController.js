@@ -44,7 +44,7 @@ const consolidateActiveTableOrders = async (tableId, sessionId) => {
         const RestaurantSettings = require('../models/RestaurantSettings');
         const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
         const defaultGST = settings?.taxSettings?.defaultGSTPercent ?? 5;
-        const defaultVAT = settings?.taxSettings?.defaultVATPercent ?? 20;
+        const defaultVAT = settings?.taxSettings?.defaultVATPercent ?? 18.9;
 
         let itemsAppended = false;
         for (const redOrder of redundantOrders) {
@@ -163,7 +163,7 @@ exports.createOrder = async (req, res) => {
         // 2. Calculate totals & process items
         const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
         const defaultGST = settings?.taxSettings?.defaultGSTPercent ?? 5;
-        const defaultVAT = settings?.taxSettings?.defaultVATPercent ?? 20;
+        const defaultVAT = settings?.taxSettings?.defaultVATPercent ?? 18.9;
 
         let addedSubtotal = 0;
         let addedTax = 0;
@@ -450,8 +450,10 @@ exports.createOrder = async (req, res) => {
         if (io) {
             io.emit('new_kitchen_order', populatedOrder);
             io.emit('new_order', populatedOrder);
-            io.emit('new_air_menu_order', populatedOrder);
-            io.emit('air_menu_order', populatedOrder);
+            if (isAirMenu) {
+                io.emit('new_air_menu_order', populatedOrder);
+                io.emit('air_menu_order', populatedOrder);
+            }
             io.emit('order_status_updated', populatedOrder);
             io.emit('order_updated', populatedOrder);
         }

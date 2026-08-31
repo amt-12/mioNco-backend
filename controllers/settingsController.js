@@ -13,8 +13,24 @@ const getOrCreateSettings = async () => {
                 { name: 'Mio Privè', subtitle: 'Private Dining' },
                 { name: 'Mio Bistro', subtitle: 'Casual Dining' },
                 { name: 'Mio Palazzo', subtitle: 'Fine Dining' }
-            ]
+            ],
+            taxSettings: {
+                serviceChargeRate: 5,
+                serviceChargeEnabled: true,
+                gstEnabled: true,
+                vatEnabled: true,
+                defaultGSTPercent: 5,
+                defaultVATPercent: 18.9
+            }
         });
+    } else {
+        if (!settings.taxSettings) {
+            settings.taxSettings = { serviceChargeRate: 5, serviceChargeEnabled: true, gstEnabled: true, vatEnabled: true, defaultGSTPercent: 5, defaultVATPercent: 18.9 };
+            await settings.save();
+        } else if (settings.taxSettings.defaultVATPercent === 20 || settings.taxSettings.defaultVATPercent === undefined) {
+            settings.taxSettings.defaultVATPercent = 18.9;
+            await settings.save();
+        }
     }
     
     return settings;

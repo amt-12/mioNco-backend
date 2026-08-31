@@ -444,72 +444,87 @@ exports.getWaiterPunchStats = async (req, res) => {
         };
 
         orders.forEach(order => {
-            const masterWIdKey = order.waiter ? order.waiter._id.toString() : 'unassigned';
-            
-            if (!waiterStatsMap[masterWIdKey]) {
-                waiterStatsMap[masterWIdKey] = {
-                    waiterId: order.waiter?._id || null,
-                    name: order.waiter?.name || 'Staff Member',
-                    email: order.waiter?.email || '',
-                    role: order.waiter?.role || 'Staff',
-                    status: 'Active',
-                    totalOrders: 0,
-                    totalItems: 0,
-                    totalSales: 0,
-                    activeOrders: 0,
-                    completedOrders: 0,
-                    ordersList: []
-                };
-            }
-
-            const masterStats = waiterStatsMap[masterWIdKey];
-            masterStats.totalOrders += 1;
-
-            if (['Completed', 'Served'].includes(order.status)) {
-                masterStats.completedOrders += 1;
-            } else {
-                masterStats.activeOrders += 1;
-            }
+            const contributingWaiters = new Map(); // key -> { userObj, itemsCount, itemsSales }
 
             if (order.items && order.items.length > 0) {
                 order.items.forEach(item => {
-                    const itemWaiterUser = item.addedBy || order.waiter;
-                    const itemWKey = itemWaiterUser ? itemWaiterUser._id.toString() : 'unassigned';
-
-                    if (!waiterStatsMap[itemWKey]) {
-                        waiterStatsMap[itemWKey] = {
-                            waiterId: itemWaiterUser?._id || null,
-                            name: itemWaiterUser?.name || 'Staff Member',
-                            email: itemWaiterUser?.email || '',
-                            role: itemWaiterUser?.role || 'Staff',
-                            status: 'Active',
-                            totalOrders: 0,
-                            totalItems: 0,
-                            totalSales: 0,
-                            activeOrders: 0,
-                            completedOrders: 0,
-                            ordersList: []
-                        };
+                    const isItemAirMenu = item.isAirMenuOrder || (order.isAirMenuOrder && !item.addedBy) || order.source === 'Air Menu' || order.source === 'Air Menu Order' || order.source === 'Table QR';
+                    
+                    let itemWaiterUser = null;
+                    if (item.addedBy) {
+                        itemWaiterUser = item.addedBy;
+                    } else if (!isItemAirMenu && order.waiter) {
+                        itemWaiterUser = order.waiter;
                     }
 
-                    const iStats = waiterStatsMap[itemWKey];
+                    const itemWKey = itemWaiterUser ? itemWaiterUser._id.toString() : 'unassigned';
                     const qty = item.quantity || 1;
-                    const itemVal = item.totalPrice || (item.unitPrice * qty) || 0;
-                    iStats.totalItems += qty;
-                    iStats.totalSales += itemVal;
+                    const itemVal = item.totalPrice || ((item.unitPrice || 0) * qty) || 0;
+
+                    if (!contributingWaiters.has(itemWKey)) {
+                        contributingWaiters.set(itemWKey, {
+                            userObj: itemWaiterUser || null,
+                            itemsCount: 0,
+                            itemsSales: 0
+                        });
+                    }
+
+                    const record = contributingWaiters.get(itemWKey);
+                    record.itemsCount += qty;
+                    record.itemsSales += itemVal;
                 });
-            } else {
-                masterStats.totalSales += (order.total || 0);
+            } else if (order.waiter) {
+                const wKey = order.waiter._id.toString();
+                contributingWaiters.set(wKey, {
+                    userObj: order.waiter,
+                    itemsCount: 0,
+                    itemsSales: order.total || 0
+                });
             }
 
-            const orderItemCount = order.items ? order.items.reduce((sum, item) => sum + (item.quantity || 1), 0) : 0;
-            masterStats.ordersList.push({
-                orderId: order.orderId,
-                tableNumber: order.table?.tableNumber || 'Walk-in',
-                status: order.status,
-                total: order.total,
-                itemCount: orderItemCount,
-                createdAt: order.createdAt
+            const isOrderCompleted = ['Completed', 'Served'].includes(order.status);
+
+            // Update stats ONLY for staff who actually punched items or sales on this order
+            contributingWaiters.forEach((data, wKey) => {
+                if (data.itemsCount === 0 && data.itemsSales === 0) return;
+
+                if (!waiterStatsMap[wKey]) {
+                    const u = data.userObj;
+                    waiterStatsMap[wKey] = {
+                        waiterId: u?._id || null,
+                        name: u?.name || (wKey === 'unassigned' ? 'Unassigned / Digital QR' : 'Staff Member'),
+                        email: u?.email || (wKey === 'unassigned' ? '-' : ''),
+                        role: u?.role || (wKey === 'unassigned' ? 'System' : 'Staff'),
+                        employeeId: u?.employeeId || '',
+                        status: u?.status || 'Active',
+                        totalOrders: 0,
+                        totalItems: 0,
+                        totalSales: 0,
+                        activeOrders: 0,
+                        completedOrders: 0,
+                        ordersList: []
+                    };
+                }
+
+                const s = waiterStatsMap[wKey];
+                s.totalOrders += 1;
+                if (isOrderCompleted) {
+                    s.completedOrders += 1;
+                } else {
+                    s.activeOrders += 1;
+                }
+
+                s.totalItems += data.itemsCount;
+                s.totalSales += data.itemsSales;
+
+                s.ordersList.push({
+                    orderId: order.orderId,
+                    tableNumber: order.table?.tableNumber || (order.table?.name ? order.table.name : 'Walk-in'),
+                    status: order.status,
+                    total: data.itemsSales,
+                    itemCount: data.itemsCount,
+                    createdAt: order.createdAt
+                });
             });
         });
 
