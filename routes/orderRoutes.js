@@ -42,8 +42,8 @@ router.put('/:id/status', authorize('Super Admin', 'super_admin', 'admin', 'Rest
 
 router.post('/:orderId/items', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), addOrderItem);
 router.delete('/:orderId/items/:itemId', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), removeOrderItem);
-router.put('/:orderId/items/:itemId/status', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Kitchen Staff'), updateOrderItemStatus);
-router.put('/:orderId/items/:itemId/reject', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Kitchen Staff'), rejectItem);
-router.put('/:orderId/items/:itemId/recall', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Kitchen Staff'), recallItem);
+router.put('/:orderId/items/:itemId/status', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Kitchen Staff', 'Waiter'), updateOrderItemStatus);
+router.put('/:orderId/items/:itemId/reject', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Kitchen Staff', 'Waiter'), rejectItem);
+router.put('/:orderId/items/:itemId/recall', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Kitchen Staff', 'Waiter'), recallItem);
 
 module.exports = router;

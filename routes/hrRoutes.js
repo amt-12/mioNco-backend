@@ -1,6 +1,7 @@
 const express = require('express');
 const { 
     getDashboardAnalytics,
+    getNextEmployeeId,
     getEmployees,
     getEmployee,
     createEmployee,
@@ -17,6 +18,7 @@ const router = express.Router();
 router.use(protect); // All HR routes are protected
 
 router.get('/dashboard', authorize('Super Admin', 'super_admin', 'admin', 'HR Manager', 'Restaurant Manager'), getDashboardAnalytics);
+router.get('/next-employee-id', authorize('Super Admin', 'super_admin', 'admin', 'HR Manager', 'Restaurant Manager'), getNextEmployeeId);
 router.get('/employees', authorize('Super Admin', 'super_admin', 'admin', 'HR Manager', 'Restaurant Manager'), getEmployees);
 router.post('/employees', authorize('Super Admin', 'super_admin', 'admin', 'HR Manager'), createEmployee);
 router.get('/employees/:id', authorize('Super Admin', 'super_admin', 'admin', 'HR Manager', 'Restaurant Manager'), getEmployee);

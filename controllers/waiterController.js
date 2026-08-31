@@ -399,12 +399,12 @@ exports.getWaiterPunchStats = async (req, res) => {
         // Get all active waiters and managers
         const waiters = await User.find({
             role: { $in: ['Waiter', 'Restaurant Manager', 'Waiter Manager', 'admin', 'super_admin', 'Super Admin'] }
-        }).select('name email role status');
+        }).select('name email role status employeeId');
 
         // Fetch orders matching date filter
         const orders = await Order.find(dateQuery)
-            .populate('waiter', 'name email role')
-            .populate('items.addedBy', 'name email role')
+            .populate('waiter', 'name email role employeeId')
+            .populate('items.addedBy', 'name email role employeeId')
             .populate('table', 'tableNumber');
 
         // Map statistics per waiter
@@ -417,6 +417,7 @@ exports.getWaiterPunchStats = async (req, res) => {
                 name: w.name,
                 email: w.email,
                 role: w.role,
+                employeeId: w.employeeId || '',
                 status: w.status,
                 totalOrders: 0,
                 totalItems: 0,

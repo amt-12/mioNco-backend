@@ -43,7 +43,13 @@ exports.getPublicSettings = async (req, res, next) => {
             success: true,
             data: {
                 name: settings.profile?.name || 'Mio & Co.',
-                payment: settings.payment || {}
+                payment: settings.payment || {},
+                reservationSettings: settings.reservationSettings || {
+                    onlineReservationsEnabled: true,
+                    closedDates: [],
+                    closedDaysOfWeek: [],
+                    closureMessage: 'Reservations are currently closed for this date. Please contact our reception desk at +91 172 4087077.'
+                }
             }
         });
     } catch (error) {

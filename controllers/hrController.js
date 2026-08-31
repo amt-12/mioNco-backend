@@ -1,6 +1,20 @@
 const EmployeeProfile = require('../models/EmployeeProfile');
 const User = require('../models/User');
 
+// Helper to generate a unique employee ID starting from MIO-EMP-002
+const generateUniqueEmployeeId = async () => {
+    let num = 2;
+    let candidate = `MIO-EMP-${num.toString().padStart(3, '0')}`; // 'MIO-EMP-002'
+    while (
+        await EmployeeProfile.findOne({ employeeId: candidate }) ||
+        await User.findOne({ employeeId: candidate })
+    ) {
+        num++;
+        candidate = `MIO-EMP-${num.toString().padStart(3, '0')}`;
+    }
+    return candidate;
+};
+
 // @desc    Get HR Dashboard Analytics
 // @route   GET /api/v1/hr/dashboard
 // @access  Private
@@ -31,6 +45,18 @@ exports.getDashboardAnalytics = async (req, res) => {
     }
 };
 
+// @desc    Get next recommended unique Employee ID
+// @route   GET /api/v1/hr/next-employee-id
+// @access  Private
+exports.getNextEmployeeId = async (req, res) => {
+    try {
+        const nextId = await generateUniqueEmployeeId();
+        res.status(200).json({ success: true, data: { employeeId: nextId } });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
 // @desc    Get all employees
 // @route   GET /api/v1/hr/employees
 // @access  Private
@@ -50,7 +76,7 @@ exports.getEmployee = async (req, res) => {
     try {
         const employee = await EmployeeProfile.findById(req.params.id)
             .populate('employmentDetails.reportingManager', 'name email')
-            .populate('userAccount', 'email status');
+            .populate('userAccount', 'email status employeeId role');
             
         if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
         res.status(200).json({ success: true, data: employee });
@@ -64,26 +90,118 @@ exports.getEmployee = async (req, res) => {
 // @access  Private
 exports.createEmployee = async (req, res) => {
     try {
+        let { employeeId, initialPassword, autoActivate, ...rest } = req.body;
+
         // Generate pseudo employee ID if not provided
-        if (!req.body.employeeId) {
-            const count = await EmployeeProfile.countDocuments();
-            req.body.employeeId = `MIO-EMP-${(count + 1).toString().padStart(3, '0')}`;
+        if (!employeeId || !employeeId.trim()) {
+            employeeId = await generateUniqueEmployeeId();
+        } else {
+            employeeId = employeeId.trim();
+            // Check uniqueness in EmployeeProfile and User
+            const existingEmp = await EmployeeProfile.findOne({ employeeId });
+            if (existingEmp) {
+                return res.status(400).json({ success: false, message: `Employee ID "${employeeId}" already exists.` });
+            }
+            const existingUser = await User.findOne({ employeeId });
+            if (existingUser) {
+                return res.status(400).json({ success: false, message: `Employee ID "${employeeId}" is already assigned to a system user.` });
+            }
         }
         
-        const employee = await EmployeeProfile.create(req.body);
+        const cleanId = employeeId.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const staffEmail = rest.email?.trim() || `${cleanId}@staff.mioandco.co`;
+        const staffLastName = rest.lastName ? rest.lastName.trim() : '';
+
+        const employee = await EmployeeProfile.create({
+            ...rest,
+            lastName: staffLastName,
+            email: staffEmail,
+            employeeId
+        });
+
+        // If autoActivate is requested or password is provided upfront
+        if (autoActivate) {
+            const staffPassword = initialPassword?.trim() || employee.phoneNumber?.toString().trim() || 'MioPassword123!';
+            let role = employee.employmentDetails?.designation || 'Reception Staff';
+            const fullName = [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim() || employee.firstName;
+
+            const newUser = await User.create({
+                name: fullName,
+                email: staffEmail,
+                employeeId: employee.employeeId,
+                password: staffPassword,
+                role: role,
+                phoneNumber: employee.phoneNumber,
+                status: 'Active'
+            });
+
+            employee.userAccount = newUser._id;
+            employee.onboardingStatus = 'Active';
+            await employee.save();
+        }
+
         res.status(201).json({ success: true, data: employee });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
 };
 
-// @desc    Update employee profile (Subsequent Wizard steps)
+// @desc    Update employee profile (Subsequent Wizard steps or HR edit)
 // @route   PUT /api/v1/hr/employees/:id
 // @access  Private
 exports.updateEmployee = async (req, res) => {
     try {
-        const employee = await EmployeeProfile.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+        const employee = await EmployeeProfile.findById(req.params.id);
         if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
+
+        const { employeeId, password, ...rest } = req.body;
+
+        // If employeeId is being changed
+        if (employeeId && employeeId.trim() !== employee.employeeId) {
+            const formattedId = employeeId.trim();
+            const existingEmp = await EmployeeProfile.findOne({ employeeId: formattedId, _id: { $ne: employee._id } });
+            if (existingEmp) {
+                return res.status(400).json({ success: false, message: `Employee ID "${formattedId}" is already taken.` });
+            }
+            const existingUser = await User.findOne({ employeeId: formattedId, ...(employee.userAccount ? { _id: { $ne: employee.userAccount } } : {}) });
+            if (existingUser) {
+                return res.status(400).json({ success: false, message: `Employee ID "${formattedId}" is already assigned to a user account.` });
+            }
+            employee.employeeId = formattedId;
+        }
+
+        // Apply remaining updates
+        Object.keys(rest).forEach(key => {
+            if (rest[key] !== undefined) {
+                employee[key] = rest[key];
+            }
+        });
+
+        await employee.save();
+
+        // If linked User account exists, sync user details as well
+        if (employee.userAccount) {
+            const user = await User.findById(employee.userAccount);
+            if (user) {
+                user.employeeId = employee.employeeId;
+                if (rest.firstName !== undefined || rest.lastName !== undefined) {
+                    user.name = [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim() || employee.firstName;
+                }
+                if (rest.email) user.email = rest.email;
+                if (rest.phoneNumber) user.phoneNumber = rest.phoneNumber;
+                if (rest.employmentDetails?.designation) {
+                    user.role = rest.employmentDetails.designation;
+                }
+                if (rest.onboardingStatus) {
+                    user.status = (rest.onboardingStatus === 'Active') ? 'Active' : (rest.onboardingStatus === 'Suspended' || rest.onboardingStatus === 'Terminated' ? 'Inactive' : user.status);
+                }
+                if (password && password.trim().length >= 6) {
+                    user.password = password.trim();
+                }
+                await user.save();
+            }
+        }
+
         res.status(200).json({ success: true, data: employee });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
@@ -112,7 +230,7 @@ exports.verifyDocument = async (req, res) => {
     }
 };
 
-// @desc    Activate Employee Account (Generates User)
+// @desc    Activate Employee Account (Generates User with Employee ID and Password)
 // @route   POST /api/v1/hr/employees/:id/activate
 // @access  Private
 exports.activateEmployee = async (req, res) => {
@@ -121,34 +239,71 @@ exports.activateEmployee = async (req, res) => {
         if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
 
         if (employee.userAccount) {
-            return res.status(400).json({ success: false, message: 'Employee is already activated with a user account' });
+            // If already exists, ensure employeeId is synchronized and activate status
+            const existingUser = await User.findById(employee.userAccount);
+            if (existingUser) {
+                existingUser.employeeId = employee.employeeId;
+                existingUser.status = 'Active';
+                if (req.body.password && req.body.password.trim().length >= 6) {
+                    existingUser.password = req.body.password.trim();
+                }
+                await existingUser.save();
+                employee.onboardingStatus = 'Active';
+                await employee.save();
+                return res.status(200).json({ 
+                    success: true, 
+                    message: 'Employee account synchronized and activated.',
+                    data: employee 
+                });
+            }
         }
 
-        // 1. Create the User account using staff Phone Number as initial password
-        const staffPassword = employee.phoneNumber ? employee.phoneNumber.toString().trim() : 'MioPassword123!';
+        // 1. Determine staff password & email
+        const staffPassword = req.body.password?.trim() || (employee.phoneNumber ? employee.phoneNumber.toString().trim() : 'MioPassword123!');
+        const cleanId = employee.employeeId.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const staffEmail = employee.email || `${cleanId}@staff.mioandco.co`;
         
         // Ensure role exists in userSchema
         let role = employee.employmentDetails?.designation || 'Reception Staff';
         
-        const newUser = await User.create({
-            name: `${employee.firstName} ${employee.lastName}`,
-            email: employee.email,
-            password: staffPassword,
-            role: role,
-            phoneNumber: employee.phoneNumber,
-            status: 'Active'
+        // Check if a user with same email or employeeId already exists
+        let user = await User.findOne({
+            $or: [
+                { email: staffEmail },
+                { employeeId: employee.employeeId }
+            ]
         });
 
+        const fullName = [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim() || employee.firstName;
+
+        if (user) {
+            user.employeeId = employee.employeeId;
+            user.name = fullName;
+            user.phoneNumber = employee.phoneNumber;
+            user.role = role;
+            user.status = 'Active';
+            user.password = staffPassword;
+            await user.save();
+        } else {
+            user = await User.create({
+                name: fullName,
+                email: staffEmail,
+                employeeId: employee.employeeId,
+                password: staffPassword,
+                role: role,
+                phoneNumber: employee.phoneNumber,
+                status: 'Active'
+            });
+        }
+
         // 2. Link back to EmployeeProfile and update status
-        employee.userAccount = newUser._id;
+        employee.userAccount = user._id;
         employee.onboardingStatus = 'Active';
         await employee.save();
 
-        // Optional: Trigger welcome notification here if integrated
-
         res.status(200).json({ 
             success: true, 
-            message: 'Employee activated successfully. User account generated.',
+            message: `Employee activated successfully! Staff can sign in using Employee ID (${employee.employeeId}) and password.`,
             data: employee 
         });
 
@@ -178,3 +333,4 @@ exports.deleteEmployee = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+

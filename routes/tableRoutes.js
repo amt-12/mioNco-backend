@@ -3,7 +3,7 @@ const {
   getTables, createTable, updateTable, deleteTable, 
   updateTableStatus, updateTablePosition, getTableKPIs,
   verifyTable, occupyTablePublic, freeTablePublic, verifyReservedTablePhone,
-  updateTablePax
+  updateTablePax, registerAirMenuCustomer, transferTablePublic
 } = require('../controllers/tableController');
 
 const { protect } = require('../middlewares/authMiddleware');
@@ -14,15 +14,17 @@ const router = express.Router({ mergeParams: true }); // Important to access flo
 // Public endpoint for QR code scans
 router.get('/:id/verify', verifyTable);
 
-// Public endpoint for digital menu to list tables, confirm occupancy and verify reserved phone
+// Public endpoint for digital menu to list tables, confirm occupancy, transfer tables, link customer and verify reserved phone
 router.get('/public', getTables);
 router.post('/public/occupy', occupyTablePublic);
 router.post('/public/free', freeTablePublic);
+router.post('/public/transfer', transferTablePublic);
 router.post('/public/verify-reserved-phone', verifyReservedTablePhone);
+router.post('/public/register-customer', registerAirMenuCustomer);
 
 router.use(protect);
 
-router.get('/kpis', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), getTableKPIs);
+router.get('/kpis', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), getTableKPIs);
 
 router
   .route('/')

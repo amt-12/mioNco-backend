@@ -182,6 +182,51 @@ exports.getMyNavigation = async (req, res) => {
     // Filter permissions for staff members
     const userPerms = user.permissions || [];
     const permMap = {};
+
+    // 1. Role-based default permissions
+    if (normalizedRole === 'waiter') {
+      permMap['dashboard'] = true;
+      permMap['waiter_pos'] = true;
+      permMap['waiter_punches'] = true;
+      permMap['all_orders'] = true;
+      permMap['popular_by_floor'] = true;
+      permMap['task_queue'] = true;
+      permMap['live_floor'] = true;
+    } else if (normalizedRole === 'chef' || normalizedRole === 'kitchenstaff') {
+      permMap['dashboard'] = true;
+      permMap['kitchen_analytics'] = true;
+      permMap['live_kds'] = true;
+      permMap['kitchen_history'] = true;
+      permMap['inventory_kitchen_issues'] = true;
+    } else if (normalizedRole === 'receptionstaff' || normalizedRole === 'receptionist') {
+      permMap['dashboard'] = true;
+      permMap['res_dashboard'] = true;
+      permMap['res_list'] = true;
+      permMap['res_calendar'] = true;
+      permMap['res_new'] = true;
+      permMap['live_floor'] = true;
+      permMap['customer_directory'] = true;
+    } else if (normalizedRole === 'hrmanager') {
+      permMap['dashboard'] = true;
+      permMap['hr_dashboard'] = true;
+      permMap['employee_directory'] = true;
+      permMap['onboard_staff'] = true;
+    } else if (normalizedRole === 'cashier') {
+      permMap['dashboard'] = true;
+      permMap['revenue_overview'] = true;
+      permMap['invoices_directory'] = true;
+      permMap['daily_sales_report'] = true;
+      permMap['waiter_pos'] = true;
+      permMap['all_orders'] = true;
+    } else if (normalizedRole === 'restaurantmanager' || normalizedRole === 'manager') {
+      // Restaurant Manager has full operational access
+      return res.status(200).json({
+        success: true,
+        data: SYSTEM_MODULES
+      });
+    }
+
+    // 2. Explicit custom permissions override
     userPerms.forEach(p => {
       if (p.read || p.allAccess || p.granted) {
         permMap[p.moduleKey] = true;

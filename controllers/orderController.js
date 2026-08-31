@@ -92,6 +92,8 @@ exports.createOrder = async (req, res) => {
     try {
         const { tableId, floorId, items, source, waiter, priority, customerNotes, pax, guests, paxCount } = req.body;
         const resolvedPax = Math.max(1, Number(pax || guests || paxCount || 1));
+        const srcStr = String(source || '').toLowerCase();
+        const isAirMenu = srcStr.includes('air') || srcStr.includes('qr') || srcStr.includes('table qr') || srcStr.includes('customer') || Boolean(req.body.isAirMenuOrder);
 
         if (!items || items.length === 0) {
             return res.status(400).json({ success: false, message: 'Cart items are required' });
@@ -139,16 +141,11 @@ exports.createOrder = async (req, res) => {
             await session.save();
         }
 
-            // Mark table as Air Menu Order or Occupied and emit real-time status
+            // Mark table as Occupied and emit real-time status
             if (targetTable) {
-                const srcStr = String(source || '').toLowerCase();
-                const isAirMenu = srcStr.includes('air') || srcStr.includes('qr') || srcStr.includes('customer') || Boolean(req.body.isAirMenuOrder);
-
+                targetTable.status = 'Occupied';
                 if (isAirMenu) {
-                    targetTable.status = 'Air Menu Order';
                     targetTable.hasAirMenuOrder = true;
-                } else if (!targetTable.status || targetTable.status === 'Available') {
-                    targetTable.status = 'Occupied';
                 }
                 await targetTable.save();
 
@@ -246,7 +243,8 @@ exports.createOrder = async (req, res) => {
                 unitPrice,
                 totalPrice,
                 notes: item.notes,
-                addedBy: req.user?._id || waiter || null,
+                addedBy: item.addedBy || item.waiter || req.user?._id || waiter || null,
+                isAirMenuOrder: isAirMenu,
                 status: 'Pending'
             };
         }));
@@ -313,6 +311,10 @@ exports.createOrder = async (req, res) => {
                 existingOrder.pax = resolvedPax;
             }
 
+            if (isAirMenu) {
+                existingOrder.isAirMenuOrder = true;
+            }
+
             // Always reset status to 'Pending Acceptance' so newly added items land in 'Incoming' on Live KDS
             existingOrder.status = 'Pending Acceptance';
 
@@ -325,7 +327,8 @@ exports.createOrder = async (req, res) => {
                 orderId,
                 session: session ? session._id : null,
                 table: validTableId || null,
-                source: source || 'Waiter POS',
+                source: isAirMenu ? 'Air Menu' : (source || 'Waiter POS'),
+                isAirMenuOrder: isAirMenu,
                 waiter: waiter || req.user?._id || null,
                 items: processedItems,
                 status: 'Pending Acceptance',
@@ -379,14 +382,19 @@ exports.createOrder = async (req, res) => {
                 const NotificationLog = require('../models/NotificationLog');
                 const cleanPhone = String(customerPhone).trim();
 
+                const custName = req.body.customerName || req.body.name;
                 let customer = await Customer.findOne({ phone: cleanPhone });
                 if (!customer) {
                     customer = await Customer.create({
-                        name: `Customer (${cleanPhone.slice(-4)})`,
+                        name: custName ? custName.trim() : `Customer (${cleanPhone.slice(-4)})`,
                         phone: cleanPhone,
                         totalSpend: 0,
                         loyaltyPoints: 0
                     });
+                } else {
+                    if (custName && custName.trim() && (customer.name.startsWith('Customer (') || customer.name === 'Guest')) {
+                        customer.name = custName.trim();
+                    }
                 }
 
                 const currentOrderTotal = Number(addedTotal || order.total || 0);
@@ -414,6 +422,16 @@ exports.createOrder = async (req, res) => {
                 }
 
                 await customer.save();
+
+                // Attach customer to order & session for unified CRM history
+                if (order && !order.customer) {
+                    order.customer = customer._id;
+                    await order.save();
+                }
+                if (session && !session.customer) {
+                    session.customer = customer._id;
+                    await session.save();
+                }
             } catch (loyaltyErr) {
                 console.error('Loyalty tracking error:', loyaltyErr);
             }
@@ -431,7 +449,11 @@ exports.createOrder = async (req, res) => {
         const io = req.app.get('io');
         if (io) {
             io.emit('new_kitchen_order', populatedOrder);
+            io.emit('new_order', populatedOrder);
+            io.emit('new_air_menu_order', populatedOrder);
+            io.emit('air_menu_order', populatedOrder);
             io.emit('order_status_updated', populatedOrder);
+            io.emit('order_updated', populatedOrder);
         }
 
         res.status(201).json({ 
@@ -630,15 +652,19 @@ exports.updateOrderItemStatus = async (req, res) => {
         if (status === 'Served') item.servedAt = new Date();
         if (status === 'Cancelled') item.cancelledAt = new Date();
 
-        // Check if all items are ready, then update overall order status
-        let becameReady = false;
-        const allItemsReadyOrServed = order.items.every(i => 
+        // Check if all items are served, or ready, then update overall order status
+        const allItemsServedOrCancelled = order.items.length > 0 && order.items.every(i => 
+            i.status === 'Served' || i.status === 'Cancelled'
+        );
+        const allItemsReadyOrServed = order.items.length > 0 && order.items.every(i => 
             i.status === 'Ready' || i.status === 'Served' || i.status === 'Cancelled'
         );
         
-        if (allItemsReadyOrServed && order.status !== 'Completed' && order.status !== 'Cancelled') {
+        if (allItemsServedOrCancelled && order.status !== 'Completed' && order.status !== 'Cancelled') {
+            order.status = 'Served';
+            order.servedAt = new Date();
+        } else if (allItemsReadyOrServed && order.status !== 'Completed' && order.status !== 'Cancelled' && order.status !== 'Served') {
             order.status = 'Ready to Serve';
-            becameReady = true;
         }
 
         await order.save();
@@ -648,11 +674,16 @@ exports.updateOrderItemStatus = async (req, res) => {
             .populate('waiter', 'name')
             .populate({
                 path: 'items.menuItem',
-                select: 'foodName displayName'
+                select: 'foodName displayName kitchenStation'
             });
 
         const io = req.app.get('io');
-        if (io) io.emit('order_item_status_updated', populatedOrder);
+        if (io) {
+            io.emit('order_item_status_updated', populatedOrder);
+            io.emit('order_status_updated', populatedOrder);
+            io.emit('kitchen_order_updated', populatedOrder);
+            io.emit('order_updated', populatedOrder);
+        }
 
         res.status(200).json({ success: true, data: populatedOrder });
     } catch (error) {

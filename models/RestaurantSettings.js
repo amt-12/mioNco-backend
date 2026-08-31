@@ -88,6 +88,15 @@ const restaurantSettingsSchema = new mongoose.Schema({
         upiName: { type: String, default: 'Mio & Co.' },
         upiQrImage: { type: String, default: '' }
     },
+    reservationSettings: {
+        onlineReservationsEnabled: { type: Boolean, default: true },
+        closedDates: [{ type: String }],
+        closedDaysOfWeek: [{ type: String }],
+        closureMessage: { 
+            type: String, 
+            default: 'Reservations are currently closed for this date. Please contact our reception desk at +91 172 4087077.' 
+        }
+    },
     taxSettings: {
         serviceChargeRate: { type: Number, default: 5 },
         serviceChargeEnabled: { type: Boolean, default: true },

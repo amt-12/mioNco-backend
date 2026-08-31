@@ -1,6 +1,12 @@
 const Reservation = require('../models/Reservation');
 const Customer = require('../models/Customer');
 const Table = require('../models/Table');
+const RestaurantSettings = require('../models/RestaurantSettings');
+const { 
+    sendReservationReceivedWhatsApp, 
+    sendReservationConfirmedWhatsApp, 
+    sendReservationRejectedWhatsApp 
+} = require('../services/whatsappService');
 
 // Generate unique ID
 const generateResId = async () => {
@@ -90,6 +96,30 @@ exports.createReservation = async (req, res) => {
     try {
         const { customer, date, time, guests, source, floor, tables, specialOccasion, seatingPreference, specialRequests } = req.body;
         
+        // Check Restaurant Closed / Blackout Reservation Settings
+        const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
+        const resSettings = settings?.reservationSettings || {};
+
+        if (source === 'Website' && resSettings.onlineReservationsEnabled === false) {
+            const msg = resSettings.closureMessage || 'Online table reservations are currently closed. Please contact reception at +91 172 4087077.';
+            return res.status(400).json({ success: false, message: msg });
+        }
+
+        const formattedDate = date ? String(date).split('T')[0] : '';
+        const closedDates = (resSettings.closedDates || []).map(d => String(d).split('T')[0]);
+        if (closedDates.includes(formattedDate)) {
+            const msg = resSettings.closureMessage || 'Reservations are closed for this date. Please contact reception at +91 172 4087077.';
+            return res.status(400).json({ success: false, message: msg });
+        }
+
+        if (date && resSettings.closedDaysOfWeek && resSettings.closedDaysOfWeek.length > 0) {
+            const dayName = new Date(date).toLocaleDateString('en-US', { weekday: 'long' });
+            if (resSettings.closedDaysOfWeek.includes(dayName)) {
+                const msg = resSettings.closureMessage || `Reservations are closed on ${dayName}s. Please contact reception at +91 172 4087077.`;
+                return res.status(400).json({ success: false, message: msg });
+            }
+        }
+
         // 1. Handle Customer
         let customerDoc = await Customer.findOne({ phone: customer.phone });
         if (!customerDoc) {
@@ -107,14 +137,8 @@ exports.createReservation = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Customer already has a booking at this time.' });
         }
 
-        // 3. (Optional) Auto-assign table if not provided
-        let assignedTables = tables;
-        if (!assignedTables || assignedTables.length === 0) {
-            const availableTables = await checkTableAvailability(date, time, guests, floor);
-            if (availableTables.length > 0) {
-                assignedTables = [availableTables[0]._id];
-            }
-        }
+        // Tables are assigned by Reception staff during check-in / review unless explicitly assigned
+        const assignedTables = Array.isArray(tables) && tables.length > 0 ? tables : [];
 
         const reservationId = await generateResId();
         
@@ -124,7 +148,7 @@ exports.createReservation = async (req, res) => {
             date,
             time,
             guests,
-            source,
+            source: source || 'Website',
             floor,
             tables: assignedTables,
             specialOccasion,
@@ -134,6 +158,17 @@ exports.createReservation = async (req, res) => {
         });
 
         const populatedRes = await Reservation.findById(reservation._id).populate('customer').populate('tables').populate('floor');
+
+        // Send WhatsApp confirmation to user from 9915497887
+        try {
+            await sendReservationReceivedWhatsApp({
+                customer: customerDoc,
+                reservation: populatedRes,
+                floor: populatedRes.floor
+            });
+        } catch (waErr) {
+            console.error('[WhatsApp Error on reservation creation]:', waErr);
+        }
 
         // Emit socket event
         try {
@@ -249,6 +284,26 @@ exports.updateReservationStatus = async (req, res) => {
 
         const updatedRes = await Reservation.findById(reservation._id).populate('customer').populate('tables').populate('floor');
         
+        // Trigger WhatsApp notifications
+        try {
+            if (status === 'Confirmed' && previousStatus !== 'Confirmed') {
+                await sendReservationConfirmedWhatsApp({
+                    customer: updatedRes.customer,
+                    reservation: updatedRes,
+                    floor: updatedRes.floor,
+                    tables: updatedRes.tables
+                });
+            } else if (['Cancelled', 'Rejected'].includes(status) && previousStatus !== status) {
+                await sendReservationRejectedWhatsApp({
+                    customer: updatedRes.customer,
+                    reservation: updatedRes,
+                    floor: updatedRes.floor
+                });
+            }
+        } catch (waErr) {
+            console.error('[WhatsApp Error on reservation status update]:', waErr);
+        }
+
         try {
             const io = req.app.get('io');
             if (io) io.emit('reservation_updated', updatedRes);
@@ -337,6 +392,7 @@ exports.updateReservation = async (req, res) => {
             });
         }
 
+        const prevStatus = reservation.status;
         const prevTables = reservation.tables || [];
         const newTables = tables !== undefined ? tables : prevTables;
         const newStatus = status || reservation.status;
@@ -382,6 +438,26 @@ exports.updateReservation = async (req, res) => {
         }
 
         const updatedRes = await Reservation.findById(reservation._id).populate('customer').populate('tables').populate('floor');
+
+        // Trigger WhatsApp notifications
+        try {
+            if (newStatus === 'Confirmed' && prevStatus !== 'Confirmed') {
+                await sendReservationConfirmedWhatsApp({
+                    customer: updatedRes.customer,
+                    reservation: updatedRes,
+                    floor: updatedRes.floor,
+                    tables: updatedRes.tables
+                });
+            } else if (['Cancelled', 'Rejected'].includes(newStatus) && prevStatus !== newStatus) {
+                await sendReservationRejectedWhatsApp({
+                    customer: updatedRes.customer,
+                    reservation: updatedRes,
+                    floor: updatedRes.floor
+                });
+            }
+        } catch (waErr) {
+            console.error('[WhatsApp Error on reservation update]:', waErr);
+        }
 
         try {
             const io = req.app.get('io');

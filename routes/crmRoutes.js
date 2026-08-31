@@ -6,7 +6,8 @@ const {
     getCustomerTimeline,
     addCustomerActivity,
     updateCustomerMetadata,
-    sendWhatsAppCoupon
+    sendWhatsAppCoupon,
+    getCustomerInvoiceAnalytics
 } = require('../controllers/crmController');
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
@@ -21,6 +22,7 @@ router.get('/dashboard', authorize('Super Admin', 'super_admin', 'admin', 'Resta
 // Customers
 router.get('/customers', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getCustomers);
 router.get('/customers/:id', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getCustomer);
+router.get('/customers/:id/invoice-analytics', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getCustomerInvoiceAnalytics);
 router.put('/customers/:id/metadata', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), updateCustomerMetadata);
 router.post('/customers/:id/send-coupon', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), sendWhatsAppCoupon);
 

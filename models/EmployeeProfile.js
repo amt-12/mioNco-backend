@@ -13,17 +13,13 @@ const employeeProfileSchema = new mongoose.Schema({
     },
     lastName: {
         type: String,
-        required: [true, 'Please provide last name'],
-        trim: true
+        trim: true,
+        default: ''
     },
     email: {
         type: String,
-        required: [true, 'Please provide an email'],
-        unique: true,
-        match: [
-            /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/,
-            'Please add a valid email'
-        ]
+        trim: true,
+        sparse: true
     },
     phoneNumber: {
         type: String,

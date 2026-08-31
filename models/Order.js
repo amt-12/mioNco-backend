@@ -71,7 +71,11 @@ const orderItemSchema = new mongoose.Schema({
         default: false
     },
     spoilageRemarks: String,
-    spoilageMarkedBy: String
+    spoilageMarkedBy: String,
+    isAirMenuOrder: {
+        type: Boolean,
+        default: false
+    }
 }, { _id: true }); // ensure subdocs have IDs
 
 const orderSchema = new mongoose.Schema({
@@ -91,8 +95,12 @@ const orderSchema = new mongoose.Schema({
     },
     source: {
         type: String,
-        enum: ['Table QR', 'Waiter', 'Waiter POS', 'Reception', 'Admin', 'Dine In', 'Dine-In', 'Takeaway', 'Delivery', 'POS'],
+        enum: ['Table QR', 'Air Menu', 'Customer (Air Menu)', 'Waiter', 'Waiter POS', 'Reception', 'Admin', 'Dine In', 'Dine-In', 'Takeaway', 'Delivery', 'POS'],
         default: 'Waiter'
+    },
+    isAirMenuOrder: {
+        type: Boolean,
+        default: false
     },
     waiter: {
         type: mongoose.Schema.ObjectId,

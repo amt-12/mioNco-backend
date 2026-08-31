@@ -21,7 +21,7 @@ router.get('/requests/public', getTableRequests);
 // Protected routes
 router.use(protect);
 
-router.put('/assign', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), assignWaiter);
+router.put('/assign', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter Manager', 'Waiter'), assignWaiter);
 router.get('/active', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter Manager', 'Waiter'), getActiveWaiters);
 router.get('/punch-stats', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter Manager', 'Waiter'), getWaiterPunchStats);
 

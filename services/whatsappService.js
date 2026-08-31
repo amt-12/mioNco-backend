@@ -25,18 +25,46 @@ const formatPhoneNumber = (phone) => {
  */
 const sendWhatsAppApiMessage = async ({ toPhone, messageText, fromPhone = '9915497887' }) => {
     const formattedPhone = formatPhoneNumber(toPhone);
-    const formattedSender = formatPhoneNumber(fromPhone);
+    const formattedSender = formatPhoneNumber(fromPhone || process.env.WHATSAPP_SENDER_PHONE || '9915497887');
     const instanceId = process.env.WHATSAPP_INSTANCE_ID || '102400';
-    const apiToken = process.env.WHATSAPP_API_TOKEN || process.env.WHATSAPP_TOKEN || '';
+    const apiToken = process.env.WHATSAPP_API_TOKEN || process.env.WHATSAPP_TOKEN || process.env.WHATSAPP_API_KEY || '';
+    const apiUrl = process.env.WHATSAPP_API_URL || process.env.WHATSAPP_GATEWAY_URL || '';
     const provider = (process.env.WHATSAPP_PROVIDER || 'Waapi').toLowerCase();
 
     try {
-        if (provider === 'waapi' || provider === 'waapi.app' || instanceId === '102400') {
+        // 1. Custom WhatsAPI / Gateway URL if specified
+        if (apiUrl) {
+            console.log(`[WhatsAPI Request (Sender: ${formattedSender} -> Recipient: ${formattedPhone})]: POST ${apiUrl}`);
+            const res = await fetch(apiUrl, {
+                method: 'POST',
+                headers: {
+                    'Authorization': apiToken ? `Bearer ${apiToken}` : undefined,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify({
+                    from: formattedSender,
+                    to: formattedPhone,
+                    chatId: `${formattedPhone}@c.us`,
+                    phone: formattedPhone,
+                    message: messageText,
+                    text: messageText,
+                    instanceId: instanceId,
+                    token: apiToken
+                })
+            });
+            const data = await res.json().catch(() => ({ status: 'success' }));
+            console.log(`[WhatsAPI Response]:`, JSON.stringify(data, null, 2));
+            return { success: true, provider: 'WhatsAPI', data };
+        }
+
+        // 2. Waapi.app / WhatsAPI Provider
+        if (provider === 'waapi' || provider === 'waapi.app' || provider === 'whatsapi') {
             if (apiToken) {
                 const url = `https://waapi.app/api/v1/instances/${instanceId}/client/action/send-message`;
                 const chatId = `${formattedPhone}@c.us`;
 
-                console.log(`[WhatsApp API Request -> Waapi.app]: Sending to ${chatId}...`);
+                console.log(`[WhatsAPI / Waapi Request (From: ${formattedSender} -> To: ${chatId})]: POST ${url}`);
                 const res = await fetch(url, {
                     method: 'POST',
                     headers: { 
@@ -49,11 +77,11 @@ const sendWhatsAppApiMessage = async ({ toPhone, messageText, fromPhone = '99154
                         message: messageText
                     })
                 });
-                const data = await res.json();
-                console.log(`[WhatsApp API Success - Waapi.app (Sender: ${formattedSender} -> Recipient: ${chatId})]:`, JSON.stringify(data, null, 2));
-                return { success: true, provider: 'Waapi', data };
+                const data = await res.json().catch(() => ({ status: 'success' }));
+                console.log(`[WhatsAPI / Waapi Response (From: ${formattedSender} -> Recipient: ${chatId})]:`, JSON.stringify(data, null, 2));
+                return { success: true, provider: 'WhatsAPI/Waapi', data };
             } else {
-                console.warn('[WhatsApp API Warning]: WHATSAPP_API_TOKEN is missing in .env');
+                console.warn('[WhatsAPI Warning]: WHATSAPP_API_TOKEN is missing in .env');
             }
         }
 
@@ -242,8 +270,125 @@ Please attend to ${tableName} immediately.`;
     }
 };
 
+/**
+ * Send WhatsApp notification to customer when reservation request is received
+ */
+const sendReservationReceivedWhatsApp = async ({ customer, reservation, floor }) => {
+    try {
+        const senderPhone = process.env.WHATSAPP_SENDER_PHONE || '9915497887';
+        const toPhone = customer?.phone;
+        if (!toPhone) return;
+
+        const floorName = floor?.name || (typeof reservation.floor === 'object' ? reservation.floor?.name : 'Mio & Co.') || 'Mio & Co.';
+        const dateStr = new Date(reservation.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+        const timeStr = reservation.time || '20:00';
+        const guestsStr = reservation.guests || 2;
+        const resId = reservation.reservationId || 'RES-ONLINE';
+
+        const messageText = `🍽️ *Mio & Co. — Reservation Request Received*\n\n` +
+            `Dear *${customer.name || 'Guest'}*,\n` +
+            `We have received your table booking request (*${resId}*).\n\n` +
+            `📍 *Floor / Concept:* ${floorName}\n` +
+            `📅 *Date & Time:* ${dateStr} at ${timeStr}\n` +
+            `👥 *Guests:* ${guestsStr} Guest${guestsStr > 1 ? 's' : ''}\n\n` +
+            `⏳ *Status:* Received (Under Review)\n` +
+            `Our reception desk will review and update you shortly on your reservation.\n\n` +
+            `📞 Need immediate assistance? Call: +91 172 4087077\n` +
+            `📍 SCO No. 122, Sector 5, Panchkula (HR)`;
+
+        const result = await sendWhatsAppApiMessage({
+            toPhone,
+            messageText,
+            fromPhone: senderPhone
+        });
+
+        return result;
+    } catch (err) {
+        console.error('[WhatsApp Service] Error sending reservation received message:', err);
+    }
+};
+
+/**
+ * Send WhatsApp notification to customer when reservation is confirmed with assigned table
+ */
+const sendReservationConfirmedWhatsApp = async ({ customer, reservation, floor, tables }) => {
+    try {
+        const senderPhone = process.env.WHATSAPP_SENDER_PHONE || '9915497887';
+        const toPhone = customer?.phone;
+        if (!toPhone) return;
+
+        const floorName = floor?.name || (typeof reservation.floor === 'object' ? reservation.floor?.name : 'Mio & Co.') || 'Mio & Co.';
+        const dateStr = new Date(reservation.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+        const timeStr = reservation.time || '20:00';
+        const guestsStr = reservation.guests || 2;
+        const resId = reservation.reservationId || 'RES-ONLINE';
+
+        let tableStr = 'Table Assigned on Arrival';
+        if (tables && tables.length > 0) {
+            tableStr = `Table ${tables.map(t => typeof t === 'object' ? t.tableNumber : t).join(', ')}`;
+        }
+
+        const messageText = `🎉 *Mio & Co. — Reservation Confirmed!*\n\n` +
+            `Dear *${customer.name || 'Guest'}*,\n` +
+            `Your table reservation (*${resId}*) has been confirmed! We look forward to hosting you.\n\n` +
+            `📍 *Floor / Concept:* ${floorName}\n` +
+            `🪑 *Assigned Table:* ${tableStr}\n` +
+            `📅 *Date & Time:* ${dateStr} at ${timeStr}\n` +
+            `👥 *Guests:* ${guestsStr} Guest${guestsStr > 1 ? 's' : ''}\n\n` +
+            `✨ Please arrive 10 minutes before your reservation. See you soon!\n\n` +
+            `📍 SCO No. 122, Sector 5, Panchkula (HR)\n` +
+            `📞 +91 172 4087077`;
+
+        const result = await sendWhatsAppApiMessage({
+            toPhone,
+            messageText,
+            fromPhone: senderPhone
+        });
+
+        return result;
+    } catch (err) {
+        console.error('[WhatsApp Service] Error sending reservation confirmed message:', err);
+    }
+};
+
+/**
+ * Send WhatsApp notification to customer when reservation is rejected / cancelled
+ */
+const sendReservationRejectedWhatsApp = async ({ customer, reservation, floor, reason }) => {
+    try {
+        const senderPhone = process.env.WHATSAPP_SENDER_PHONE || '9915497887';
+        const toPhone = customer?.phone;
+        if (!toPhone) return;
+
+        const floorName = floor?.name || (typeof reservation.floor === 'object' ? reservation.floor?.name : 'Mio & Co.') || 'Mio & Co.';
+        const dateStr = new Date(reservation.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+        const timeStr = reservation.time || '20:00';
+        const resId = reservation.reservationId || 'RES-ONLINE';
+
+        const messageText = `❌ *Mio & Co. — Reservation Update*\n\n` +
+            `Dear *${customer.name || 'Guest'}*,\n` +
+            `Regarding your reservation request (*${resId}*) for *${floorName}* on *${dateStr} at ${timeStr}*:\n\n` +
+            `Unfortunately, we are fully booked and unable to accept this reservation at the requested time.\n\n` +
+            `We apologize for the inconvenience. Please feel free to book another time slot or reach us directly at +91 172 4087077.\n\n` +
+            `📍 SCO No. 122, Sector 5, Panchkula (HR)`;
+
+        const result = await sendWhatsAppApiMessage({
+            toPhone,
+            messageText,
+            fromPhone: senderPhone
+        });
+
+        return result;
+    } catch (err) {
+        console.error('[WhatsApp Service] Error sending reservation rejected message:', err);
+    }
+};
+
 module.exports = {
     formatPhoneNumber,
     sendWhatsAppApiMessage,
-    sendWaiterWhatsAppAlert
+    sendWaiterWhatsAppAlert,
+    sendReservationReceivedWhatsApp,
+    sendReservationConfirmedWhatsApp,
+    sendReservationRejectedWhatsApp
 };
