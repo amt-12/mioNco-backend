@@ -139,9 +139,17 @@ exports.createOrder = async (req, res) => {
             await session.save();
         }
 
-            // Mark table as Occupied and emit real-time status
+            // Mark table as Air Menu Order or Occupied and emit real-time status
             if (targetTable) {
-                targetTable.status = 'Occupied';
+                const srcStr = String(source || '').toLowerCase();
+                const isAirMenu = srcStr.includes('air') || srcStr.includes('qr') || srcStr.includes('customer') || Boolean(req.body.isAirMenuOrder);
+
+                if (isAirMenu) {
+                    targetTable.status = 'Air Menu Order';
+                    targetTable.hasAirMenuOrder = true;
+                } else if (!targetTable.status || targetTable.status === 'Available') {
+                    targetTable.status = 'Occupied';
+                }
                 await targetTable.save();
 
                 const io = req.app.get('io');
@@ -151,6 +159,7 @@ exports.createOrder = async (req, res) => {
                         .populate('mergedWith', 'tableNumber');
                     io.emit('table_status_changed', populatedTable);
                     io.emit('table_status_updated', populatedTable);
+                    io.emit('new_air_menu_order', { table: populatedTable });
                 }
             }
 

@@ -25,6 +25,36 @@ const generateBillNumber = async () => {
   return number;
 };
 
+// Helper to safely extract or resolve a valid Table ObjectId
+const resolveTableObjectId = async (val) => {
+  if (!val) return null;
+  if (typeof val === 'object' && val._id && mongoose.Types.ObjectId.isValid(val._id)) {
+    return val._id;
+  }
+  if (typeof val === 'string' && mongoose.Types.ObjectId.isValid(val)) {
+    return val;
+  }
+  
+  // If val is an object like { name: 'Table T2' } or string like "Table T2" / "T2"
+  const searchStr = typeof val === 'object'
+    ? (val.tableNumber || val.name || val.tableName || '').toString()
+    : val.toString();
+
+  if (!searchStr) return null;
+  const cleanNum = searchStr.replace(/^(table|t)\s*/i, '').trim();
+
+  const foundTable = await Table.findOne({
+    $or: [
+      { tableNumber: cleanNum },
+      { name: searchStr },
+      { name: `Table ${cleanNum}` },
+      { name: `Table T${cleanNum}` }
+    ]
+  });
+
+  return foundTable ? foundTable._id : null;
+};
+
 // Helper function to compute itemized taxes & bill totals
 const calculateBillTotals = async (rawItems, options = {}) => {
   const {
@@ -1587,18 +1617,20 @@ exports.recordPayment = async (req, res) => {
     if (!bill) {
       const targetId = orderId || req.params.id;
       let targetOrders = [];
-      let targetTable = tableId;
+      let rawTableCandidate = tableId || (billData ? billData.table : null);
+      let targetTable = await resolveTableObjectId(rawTableCandidate);
       let rawItems = [];
 
       if (billData && billData.items) {
         rawItems = billData.items;
         if (billData.orders) targetOrders = billData.orders;
-        if (billData.table) targetTable = billData.table?._id || billData.table;
       } else if (mongoose.Types.ObjectId.isValid(targetId)) {
         const ord = await Order.findById(targetId).populate('items.menuItem');
         if (ord) {
           targetOrders = [ord._id];
-          targetTable = targetTable || ord.table;
+          if (!targetTable) {
+            targetTable = await resolveTableObjectId(ord.table);
+          }
           rawItems = (ord.items || []).filter(i => i.status !== 'Cancelled').map(i => ({
             menuItem: i.menuItem?._id || i.menuItem,
             foodName: i.foodName || i.menuItem?.foodName || 'Item',

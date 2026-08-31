@@ -19,7 +19,33 @@ exports.getTables = async (req, res, next) => {
              .populate({ path: 'mergedWith', select: 'tableNumber' });
 
         const tables = await query;
-        res.status(200).json({ success: true, count: tables.length, data: tables });
+
+        const Order = require('../models/Order');
+        const activeAirOrders = await Order.find({
+            status: { $nin: ['Completed', 'Cancelled'] },
+            $or: [
+                { source: /air/i },
+                { source: /qr/i },
+                { source: /customer/i }
+            ]
+        }).select('table source');
+
+        const airTableIds = new Set(
+            activeAirOrders.map(o => String(o.table?._id || o.table)).filter(Boolean)
+        );
+
+        const processedTables = tables.map(t => {
+            const tObj = t.toObject();
+            if (airTableIds.has(String(t._id))) {
+                tObj.hasAirMenuOrder = true;
+                if (tObj.status === 'Available' || !tObj.status) {
+                    tObj.status = 'Air Menu Order';
+                }
+            }
+            return tObj;
+        });
+
+        res.status(200).json({ success: true, count: processedTables.length, data: processedTables });
     } catch (error) {
         next(error);
     }

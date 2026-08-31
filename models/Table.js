@@ -21,9 +21,14 @@ const tableSchema = new mongoose.Schema({
         enum: [
             'Available', 'Reserved', 'Occupied', 'Ordering', 
             'Food Preparing', 'Ready to Serve', 'Dining', 
-            'Bill Requested', 'Cleaning', 'Maintenance', 'Out of Service'
+            'Bill Requested', 'Cleaning', 'Maintenance', 'Out of Service',
+            'Air Menu Order'
         ],
         default: 'Available'
+    },
+    hasAirMenuOrder: {
+        type: Boolean,
+        default: false
     },
     floor: {
         type: mongoose.Schema.ObjectId,
