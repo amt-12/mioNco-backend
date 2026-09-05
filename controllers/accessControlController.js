@@ -9,6 +9,12 @@ const SYSTEM_MODULES = [
     key: '/dashboard',
   },
   {
+    id: 'business_day',
+    name: 'Day Start & Shift End',
+    icon: 'FieldTimeOutlined',
+    key: '/business-day',
+  },
+  {
     id: 'restaurant_group',
     name: 'Table & Floor Mgmt',
     icon: 'ShopOutlined',

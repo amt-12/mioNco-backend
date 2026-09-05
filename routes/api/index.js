@@ -21,6 +21,7 @@ const accessControlRoutes = require('../accessControlRoutes');
 const billingRoutes = require('../billingRoutes');
 const inventoryRoutes = require('../inventoryRoutes');
 const spoilageRoutes = require('../spoilageRoutes');
+const businessDayRoutes = require('../businessDayRoutes');
 const notFoundHandler = require('./notFound');
 
 // Mount v1 API routes
@@ -37,6 +38,7 @@ router.use('/v1/orders', orderRoutes);
 router.use('/v1/billing', billingRoutes);
 router.use('/v1/inventory', inventoryRoutes);
 router.use('/v1/spoilage', spoilageRoutes);
+router.use('/v1/business-day', businessDayRoutes);
 router.use('/v1/waiters', waiterRoutes);
 router.use('/v1/crm', crmRoutes);
 router.use('/v1/notifications', notificationRoutes);

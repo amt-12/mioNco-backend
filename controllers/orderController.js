@@ -744,24 +744,50 @@ exports.rejectItem = async (req, res) => {
         const order = await Order.findById(orderId);
         if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-        const item = order.items.id(itemId);
+        let item = null;
+        if (itemId) {
+            item = order.items.id(itemId);
+            if (!item) {
+                item = order.items.find(i => String(i._id) === String(itemId) || String(i.id) === String(itemId));
+            }
+        }
         if (!item) return res.status(404).json({ success: false, message: 'Item not found in order' });
 
         item.status = 'Cancelled';
         item.cancelledAt = new Date();
-        item.cancelledReason = reason || 'Rejected by kitchen';
+        item.cancelledReason = reason || 'Rejected by staff';
 
-        // Check overall status
-        let becameReady = false;
-        const allItemsFinished = order.items.every(i => 
-            i.status === 'Ready' || i.status === 'Served' || i.status === 'Cancelled'
-        );
-        
-        if (allItemsFinished && order.status === 'Preparing') {
-            order.status = 'Ready to Serve';
-            becameReady = true;
+        // Recalculate order subtotal, tax & total excluding cancelled items (voiding item)
+        const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
+        const defaultGST = settings?.taxSettings?.defaultGSTPercent ?? 5;
+        const defaultVAT = settings?.taxSettings?.defaultVATPercent ?? 18.9;
+
+        let subtotal = 0;
+        let totalTax = 0;
+        order.items.forEach(i => {
+            if (i.status !== 'Cancelled' && i.status !== 'Rejected' && i.status !== 'Void') {
+                const itemTotal = i.totalPrice || ((i.unitPrice || 0) * (i.quantity || 1)) || 0;
+                subtotal += itemTotal;
+                const rate = i.taxRate || (i.itemType === 'Liquor' ? defaultVAT : defaultGST);
+                totalTax += (itemTotal * rate) / 100;
+            }
+        });
+
+        order.subtotal = Number(subtotal.toFixed(2));
+        order.tax = Number(totalTax.toFixed(2));
+        order.total = Math.round(subtotal + totalTax);
+
+        // Check overall order status
+        const activeItems = order.items.filter(i => i.status !== 'Cancelled' && i.status !== 'Rejected' && i.status !== 'Void');
+        if (activeItems.length === 0) {
+            order.status = 'Cancelled';
+        } else {
+            const allActiveFinished = activeItems.every(i => i.status === 'Ready' || i.status === 'Served');
+            if (allActiveFinished && order.status === 'Preparing') {
+                order.status = 'Ready to Serve';
+            }
         }
-        
+
         await order.save();
 
         const populatedOrder = await Order.findById(order._id)
@@ -773,7 +799,15 @@ exports.rejectItem = async (req, res) => {
             });
 
         const io = req.app.get('io');
-        if (io) io.emit('order_item_status_updated', populatedOrder);
+        if (io) {
+            io.emit('order_item_status_updated', populatedOrder);
+            io.emit('order_status_updated', populatedOrder);
+            io.emit('kitchen_order_updated', populatedOrder);
+            io.emit('order_updated', populatedOrder);
+            if (order.table) {
+                io.emit('table_orders_updated', { tableId: order.table });
+            }
+        }
 
         res.status(200).json({ success: true, data: populatedOrder });
     } catch (error) {

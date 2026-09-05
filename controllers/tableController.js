@@ -402,12 +402,14 @@ exports.freeTablePublic = async (req, res, next) => {
 // @access  Public
 exports.transferTablePublic = async (req, res, next) => {
     try {
+        console.log('⚡ Backend transferTablePublic request:', req.body);
         const { fromTableId, toTableId, customerPhone, customerName } = req.body;
         if (!fromTableId || !toTableId) {
             return res.status(400).json({ success: false, message: 'Both fromTableId and toTableId are required' });
         }
 
         const mongoose = require('mongoose');
+        const Table = require('../models/Table');
         const Order = require('../models/Order');
         const DiningSession = require('../models/DiningSession');
         const Bill = require('../models/Bill');
@@ -436,6 +438,8 @@ exports.transferTablePublic = async (req, res, next) => {
 
         const sourceTable = await resolveTable(fromTableId);
         const targetTable = await resolveTable(toTableId);
+
+        console.log('⚡ Resolved sourceTable:', sourceTable?._id, sourceTable?.tableNumber, 'targetTable:', targetTable?._id, targetTable?.tableNumber);
 
         if (!targetTable) {
             return res.status(404).json({ success: false, message: 'Target table not found' });
@@ -512,9 +516,10 @@ exports.transferTablePublic = async (req, res, next) => {
             sourceTable.status = 'Available';
             sourceTable.hasAirMenuOrder = false;
             sourceTable.assignedWaiter = null;
+            if (!sourceTable.activityHistory) sourceTable.activityHistory = [];
             sourceTable.activityHistory.push({
                 status: 'Available',
-                note: `Table transferred by customer via AIR Menu to Table ${targetTable.tableNumber || targetTable.name}.`
+                note: `Table transferred by staff/customer to Table ${targetTable.tableNumber || targetTable.name}.`
             });
             await sourceTable.save();
         }
@@ -522,11 +527,12 @@ exports.transferTablePublic = async (req, res, next) => {
         // 6. Update Target Table status -> Occupied
         targetTable.status = 'Occupied';
         targetTable.hasAirMenuOrder = true;
+        if (!targetTable.activityHistory) targetTable.activityHistory = [];
         targetTable.activityHistory.push({
             status: 'Occupied',
             note: sourceTable
-                ? `Table transferred by customer via AIR Menu from Table ${sourceTable.tableNumber || sourceTable.name}.`
-                : `Table occupied by customer via AIR Menu.`
+                ? `Table transferred by staff/customer from Table ${sourceTable.tableNumber || sourceTable.name}.`
+                : `Table occupied by staff/customer.`
         });
         await targetTable.save();
 
@@ -534,6 +540,7 @@ exports.transferTablePublic = async (req, res, next) => {
         let targetSession = await DiningSession.findOne({ table: targetTable._id, status: 'Active' });
         if (!targetSession) {
             targetSession = await DiningSession.create({
+                sessionId: `SESS-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
                 table: targetTable._id,
                 floor: targetTable.floor?._id || targetTable.floor,
                 customer: customerDoc?._id || null,
@@ -549,14 +556,30 @@ exports.transferTablePublic = async (req, res, next) => {
 
         const io = req.app.get('io');
         if (io) {
+            const transferPayload = {
+                isTransfer: true,
+                fromTableId: popSource ? String(popSource._id) : String(fromTableId),
+                fromTableNumber: popSource ? String(popSource.tableNumber) : String(fromTableId),
+                toTableId: String(popTarget._id),
+                toTableNumber: String(popTarget.tableNumber),
+                targetFloorName: popTarget.floor?.name || '',
+                targetFloorSlug: popTarget.floor?.slug || popTarget.floor?.name || ''
+            };
+            io.emit('table_transferred', transferPayload);
+
             if (popSource) {
                 io.emit('table_status_changed', popSource);
                 io.emit('table_status_updated', popSource);
+                io.emit('table_updated', popSource);
+                io.emit('table_orders_updated', { tableId: popSource._id });
             }
             io.emit('table_status_changed', popTarget);
             io.emit('table_status_updated', popTarget);
+            io.emit('table_updated', popTarget);
             io.emit('new_air_menu_order', { table: popTarget });
             io.emit('order_status_updated', { table: popTarget });
+            io.emit('table_orders_updated', { tableId: popTarget._id });
+            io.emit('tables_updated');
         }
 
         res.status(200).json({
