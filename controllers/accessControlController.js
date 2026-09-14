@@ -10,7 +10,7 @@ const SYSTEM_MODULES = [
   },
   {
     id: 'business_day',
-    name: 'Day Start & Shift End',
+    name: 'Day Start & End (Shift)',
     icon: 'FieldTimeOutlined',
     key: '/business-day',
   },
@@ -178,7 +178,7 @@ exports.getMyNavigation = async (req, res) => {
     const normalizedRole = (user?.role || '').toLowerCase().replace(/[\s_-]+/g, '');
 
     // Super Admin / Admin gets all system modules automatically
-    if (normalizedRole === 'superadmin' || normalizedRole === 'admin' || normalizedRole.includes('superadmin')) {
+    if (normalizedRole === 'superadmin' || normalizedRole === 'admin' || normalizedRole.includes('admin') || normalizedRole.includes('superadmin')) {
       return res.status(200).json({
         success: true,
         data: SYSTEM_MODULES
@@ -192,6 +192,7 @@ exports.getMyNavigation = async (req, res) => {
     // 1. Role-based default permissions
     if (normalizedRole === 'waiter') {
       permMap['dashboard'] = true;
+      permMap['business_day'] = true;
       permMap['waiter_pos'] = true;
       permMap['waiter_punches'] = true;
       permMap['all_orders'] = true;
@@ -200,12 +201,14 @@ exports.getMyNavigation = async (req, res) => {
       permMap['live_floor'] = true;
     } else if (normalizedRole === 'chef' || normalizedRole === 'kitchenstaff') {
       permMap['dashboard'] = true;
+      permMap['business_day'] = true;
       permMap['kitchen_analytics'] = true;
       permMap['live_kds'] = true;
       permMap['kitchen_history'] = true;
       permMap['inventory_kitchen_issues'] = true;
     } else if (normalizedRole === 'receptionstaff' || normalizedRole === 'receptionist') {
       permMap['dashboard'] = true;
+      permMap['business_day'] = true;
       permMap['res_dashboard'] = true;
       permMap['res_list'] = true;
       permMap['res_calendar'] = true;
@@ -214,18 +217,20 @@ exports.getMyNavigation = async (req, res) => {
       permMap['customer_directory'] = true;
     } else if (normalizedRole === 'hrmanager') {
       permMap['dashboard'] = true;
+      permMap['business_day'] = true;
       permMap['hr_dashboard'] = true;
       permMap['employee_directory'] = true;
       permMap['onboard_staff'] = true;
     } else if (normalizedRole === 'cashier') {
       permMap['dashboard'] = true;
+      permMap['business_day'] = true;
       permMap['revenue_overview'] = true;
       permMap['invoices_directory'] = true;
       permMap['daily_sales_report'] = true;
       permMap['waiter_pos'] = true;
       permMap['all_orders'] = true;
-    } else if (normalizedRole === 'restaurantmanager' || normalizedRole === 'manager') {
-      // Restaurant Manager has full operational access
+    } else if (normalizedRole.includes('manager')) {
+      // Any Manager role has full operational access
       return res.status(200).json({
         success: true,
         data: SYSTEM_MODULES
@@ -239,12 +244,13 @@ exports.getMyNavigation = async (req, res) => {
       }
     });
 
-    // Default access to dashboard
+    // Default access to dashboard and day start / end shift
     permMap['dashboard'] = true;
+    permMap['business_day'] = true;
 
     const filteredModules = SYSTEM_MODULES.map(group => {
       if (!group.children) {
-        if (permMap[group.id] || group.id === 'dashboard') {
+        if (permMap[group.id] || group.id === 'dashboard' || group.id === 'business_day') {
           return group;
         }
         return null;

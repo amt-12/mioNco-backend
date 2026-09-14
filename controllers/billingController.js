@@ -261,6 +261,22 @@ const resolveBillObject = async (idParam) => {
       .populate('createdBy', 'name role');
   }
 
+  if (b) {
+    if (!b.coveredTables || b.coveredTables.length === 0) {
+      const orderIds = (b.orders || []).map(o => o._id || o);
+      if (orderIds.length > 0) {
+        const trOrder = await Order.findOne({ _id: { $in: orderIds }, coveredTables: { $exists: true, $ne: [] } });
+        if (trOrder && trOrder.coveredTables && trOrder.coveredTables.length > 1) {
+          b.coveredTables = trOrder.coveredTables;
+          b.transferredFromTable = trOrder.transferredFromTable;
+          if (!b.notes) {
+            b.notes = `Covers ${trOrder.coveredTables.length} tables: ${trOrder.coveredTables.join(' & ')} (Transferred)`;
+          }
+        }
+      }
+    }
+  }
+
   if (!b) {
     const orderQuery = {
       $or: [
@@ -312,7 +328,10 @@ const resolveBillObject = async (idParam) => {
         finalAmount: calculated.finalAmount,
         balanceDue: calculated.finalAmount,
         paymentStatus: 'Pending',
-        status: 'Active'
+        status: 'Active',
+        transferredFromTable: ord.transferredFromTable,
+        coveredTables: ord.coveredTables || [],
+        notes: (ord.coveredTables && ord.coveredTables.length > 1) ? `Covers ${ord.coveredTables.length} tables: ${ord.coveredTables.join(' & ')} (Transferred)` : ord.notes
       });
     }
   }
@@ -350,6 +369,18 @@ const resolveBillObject = async (idParam) => {
       const calculated = await calculateBillTotals(rawItems);
       const billNumber = await generateBillNumber();
 
+      const transferredOrd = activeOrders.find(o => o.transferredFromTable || (o.coveredTables && o.coveredTables.length > 1));
+      let transferredInfo = transferredOrd?.transferredFromTable;
+      let coveredList = transferredOrd?.coveredTables;
+
+      if (!coveredList && activeOrders[0]?.session) {
+        const sess = await DiningSession.findById(activeOrders[0].session);
+        if (sess?.coveredTables && sess.coveredTables.length > 1) {
+          coveredList = sess.coveredTables;
+          transferredInfo = sess.transferredFromTable;
+        }
+      }
+
       b = new Bill({
         _id: idParam,
         billNumber,
@@ -369,7 +400,10 @@ const resolveBillObject = async (idParam) => {
         finalAmount: calculated.finalAmount,
         balanceDue: calculated.finalAmount,
         paymentStatus: 'Pending',
-        status: 'Active'
+        status: 'Active',
+        transferredFromTable: transferredInfo,
+        coveredTables: coveredList || [],
+        notes: (coveredList && coveredList.length > 1) ? `Covers ${coveredList.length} tables: ${coveredList.join(' & ')} (Transferred)` : undefined
       });
     }
   }
@@ -463,6 +497,18 @@ exports.generateBill = async (req, res) => {
     const calculated = await calculateBillTotals(rawItems);
     const billNumber = await generateBillNumber();
 
+    const transferredOrd = targetOrders.find(o => o.transferredFromTable || (o.coveredTables && o.coveredTables.length > 1));
+    let transferredInfo = transferredOrd?.transferredFromTable;
+    let coveredList = transferredOrd?.coveredTables;
+
+    if (!coveredList && targetOrders[0]?.session) {
+      const sessionDoc = await DiningSession.findById(targetOrders[0].session);
+      if (sessionDoc?.coveredTables && sessionDoc.coveredTables.length > 1) {
+        coveredList = sessionDoc.coveredTables;
+        transferredInfo = sessionDoc.transferredFromTable;
+      }
+    }
+
     const bill = new Bill({
       _id: new mongoose.Types.ObjectId(),
       billNumber,
@@ -490,13 +536,24 @@ exports.generateBill = async (req, res) => {
       amountPaid: 0,
       balanceDue: calculated.finalAmount,
       status: 'Active',
-      createdBy: req.user?._id
+      createdBy: req.user?._id,
+      transferredFromTable: transferredInfo,
+      coveredTables: coveredList || [],
+      notes: (coveredList && coveredList.length > 1) ? `Covers ${coveredList.length} tables: ${coveredList.join(' & ')} (Transferred)` : undefined
     });
+
+    await bill.save();
+
+    const populatedBill = await Bill.findById(bill._id)
+      .populate('table')
+      .populate('session')
+      .populate('orders')
+      .populate('createdBy', 'name role');
 
     return res.status(200).json({
       success: true,
-      message: 'Bill calculated successfully',
-      data: bill
+      message: 'Bill generated successfully',
+      data: populatedBill || bill
     });
   } catch (error) {
     console.error('Error generating bill:', error);
@@ -512,7 +569,11 @@ exports.getBills = async (req, res) => {
     const { status, paymentStatus, search, page = 1, limit = 100, table, order, session, isSplit, period, givenBy } = req.query;
 
     const query = {};
-    if (status && status !== 'ALL') query.status = status;
+    if (status && status !== 'ALL') {
+      query.status = status;
+    } else if (!status && paymentStatus === 'Pending') {
+      query.status = { $nin: ['Merged', 'Voided', 'Cancelled'] };
+    }
     if (paymentStatus && paymentStatus !== 'ALL') query.paymentStatus = paymentStatus;
     if (table) query.table = table;
     if (order) query.orders = order;
@@ -954,82 +1015,101 @@ exports.mergeBills = async (req, res) => {
       const cleanOrderNo = idStr.replace(/^#/, '');
       const isHexId = mongoose.Types.ObjectId.isValid(idStr);
 
-      const billQuery = {
+      let b = null;
+
+      // 1. FIRST check if this ID is an Order (orderId or Order _id)
+      const orderQuery = {
         $or: [
-          { billNumber: idStr },
-          { billNumber: cleanOrderNo }
-        ],
-        status: { $ne: 'Voided' }
+          { orderId: idStr },
+          { orderId: cleanOrderNo }
+        ]
       };
       if (isHexId) {
-        billQuery.$or.push({ _id: idStr }, { orders: idStr });
+        orderQuery.$or.push({ _id: idStr });
       }
 
-      let b = await Bill.findOne(billQuery).populate({ path: 'table', populate: { path: 'floor' } });
+      const ord = await Order.findOne(orderQuery)
+        .populate('items.menuItem')
+        .populate({ path: 'table', populate: { path: 'floor' } });
 
-      if (!b) {
-        const orderQuery = {
-          $or: [
-            { orderId: idStr },
-            { orderId: cleanOrderNo }
-          ]
-        };
-        if (isHexId) {
-          orderQuery.$or.push({ _id: idStr });
-        }
+      if (ord) {
+        // If it is an order, check if there's a dedicated single unmerged Bill for this exact order (not a merged bill ending with -M)
+        b = await Bill.findOne({
+          orders: ord._id,
+          billNumber: { $not: /-M$/ },
+          status: { $nin: ['Voided', 'Cancelled', 'Merged'] },
+          'mergedBillsList.0': { $exists: false }
+        }).populate({ path: 'table', populate: { path: 'floor' } });
 
-        const ord = await Order.findOne(orderQuery).populate('items.menuItem').populate({ path: 'table', populate: { path: 'floor' } });
-        if (ord) {
-          b = await Bill.findOne({ orders: ord._id, status: { $ne: 'Voided' } }).populate({ path: 'table', populate: { path: 'floor' } });
+        // If no single unmerged bill exists (e.g. only orders exist or previous merged bill existed),
+        // compute the constituent directly and accurately from the ORDER'S OWN ITEMS!
+        if (!b) {
+          try {
+            const rawItems = (ord.items || [])
+              .filter(item => item.status !== 'Cancelled')
+              .map(item => ({
+                menuItem: item.menuItem?._id || item.menuItem,
+                foodName: item.foodName || item.menuItem?.foodName || 'Item',
+                variantName: item.variant?.name,
+                unitPrice: item.unitPrice,
+                quantity: item.quantity,
+                totalPrice: (item.status === 'Spoiled' || item.isSpoiled) ? 0 : item.totalPrice,
+                isOnRequest: item.isOnRequest || false,
+                itemType: item.itemType || 'Food',
+                taxType: item.taxType,
+                taxRate: item.taxRate,
+                isComplimentary: Boolean(item.isComplimentary),
+                isNonChargeable: Boolean(item.isNonChargeable),
+                isSpoiled: item.status === 'Spoiled' || Boolean(item.isSpoiled),
+                spoilageRemarks: item.spoilageRemarks || '',
+                spoilageMarkedBy: item.spoilageMarkedBy || ''
+              }));
 
-          if (!b) {
-            try {
-              const rawItems = (ord.items || [])
-                .filter(item => item.status !== 'Cancelled')
-                .map(item => ({
-                  menuItem: item.menuItem?._id || item.menuItem,
-                  foodName: item.foodName || item.menuItem?.foodName || 'Item',
-                  variantName: item.variant?.name,
-                  unitPrice: item.unitPrice,
-                  quantity: item.quantity,
-                  totalPrice: item.totalPrice,
-                  isOnRequest: item.isOnRequest || false,
-                  itemType: item.itemType || 'Food',
-                  taxType: item.taxType,
-                  taxRate: item.taxRate,
-                  isComplimentary: false,
-                  isNonChargeable: false
-                }));
+            const calculated = await calculateBillTotals(rawItems);
+            const billNumber = ord.orderId || await generateBillNumber();
 
-              const calculated = await calculateBillTotals(rawItems);
-              const billNumber = ord.orderId || await generateBillNumber();
-
-              b = new Bill({
-                _id: ord._id,
-                billNumber,
-                orders: [ord._id],
-                session: ord.session,
-                table: ord.table,
-                items: calculated.items,
-                subtotal: calculated.subtotal,
-                cgstAmount: calculated.cgstAmount,
-                sgstAmount: calculated.sgstAmount,
-                vatAmount: calculated.vatAmount,
-                totalTaxAmount: calculated.totalTaxAmount,
-                serviceChargeRate: calculated.serviceChargeRate,
-                serviceChargeAmount: calculated.serviceChargeAmount,
-                serviceChargeEnabled: true,
-                taxesEnabled: true,
-                finalAmount: calculated.finalAmount,
-                balanceDue: calculated.finalAmount,
-                paymentStatus: 'Pending',
-                status: 'Active'
-              });
-            } catch (genErr) {
-              console.error('Auto-generate in-memory bill for merge error:', genErr);
-            }
+            b = {
+              _id: ord._id,
+              billNumber,
+              orders: [ord._id],
+              session: ord.session,
+              table: ord.table,
+              items: calculated.items,
+              subtotal: calculated.subtotal,
+              cgstAmount: calculated.cgstAmount,
+              sgstAmount: calculated.sgstAmount,
+              vatAmount: calculated.vatAmount,
+              totalTaxAmount: calculated.totalTaxAmount,
+              serviceChargeRate: calculated.serviceChargeRate,
+              serviceChargeAmount: calculated.serviceChargeAmount,
+              serviceChargeEnabled: true,
+              taxesEnabled: true,
+              finalAmount: calculated.finalAmount,
+              balanceDue: calculated.finalAmount,
+              paymentStatus: 'Pending',
+              status: 'Active',
+              isOrderBased: true
+            };
+          } catch (genErr) {
+            console.error('Auto-generate in-memory constituent bill error:', genErr);
           }
         }
+      }
+
+      // 2. If not an order, check if it's a Bill document by billNumber or _id (ignoring already-merged/voided bills)
+      if (!b) {
+        const billQuery = {
+          $or: [
+            { billNumber: idStr },
+            { billNumber: cleanOrderNo }
+          ],
+          status: { $nin: ['Voided', 'Cancelled', 'Merged'] }
+        };
+        if (isHexId) {
+          billQuery.$or.push({ _id: idStr });
+        }
+
+        b = await Bill.findOne(billQuery).populate({ path: 'table', populate: { path: 'floor' } });
       }
 
       if (b) {
@@ -1115,6 +1195,7 @@ exports.mergeBills = async (req, res) => {
       table: firstBill?.table?._id || firstBill?.table || (mergedOrders[0] ? (await Order.findById(mergedOrders[0]))?.table : null),
       customer: firstBill?.customer || null,
       mergedBillsList,
+      coveredTables: tableDescriptions,
       items: calculated.items,
       subtotal: calculated.subtotal,
       cgstAmount: calculated.cgstAmount,
@@ -1133,9 +1214,57 @@ exports.mergeBills = async (req, res) => {
       createdBy: req.user?._id
     });
 
+    await mergedBill.save();
+
+    // Retire constituent bills so they don't remain as active pending bills
+    for (const b of billsToMerge) {
+      if (b._id && !b.isOrderBased) {
+        await Bill.findByIdAndUpdate(b._id, {
+          status: 'Merged',
+          paymentStatus: 'Merged',
+          notes: `Merged into ${mergedBill.billNumber}`
+        });
+      }
+    }
+
+    // Link constituent orders to the new consolidated merged bill and retire any previous dangling merged bills
+    const uniqueMergedOrderIds = [...new Set(mergedOrders.map(o => o.toString()))];
+    if (uniqueMergedOrderIds.length > 0) {
+      await Bill.updateMany(
+        {
+          _id: { $ne: mergedBill._id },
+          orders: { $in: uniqueMergedOrderIds },
+          status: { $ne: 'Voided' }
+        },
+        {
+          status: 'Merged',
+          paymentStatus: 'Merged',
+          notes: `Superseded by merged bill ${mergedBill.billNumber}`
+        }
+      );
+
+      await Order.updateMany(
+        { _id: { $in: uniqueMergedOrderIds } },
+        { bill: mergedBill._id }
+      );
+    }
+
+    await mergedBill.populate([
+      { path: 'table', populate: { path: 'floor' } },
+      { path: 'orders' }
+    ]);
+
+    const io = req.app.get('io') || req.app.get('socketio');
+    if (io) {
+      io.emit('bill_created', mergedBill);
+      io.emit('bill_updated', mergedBill);
+      io.emit('tables_updated');
+      io.emit('orders_updated');
+    }
+
     return res.json({
       success: true,
-      message: 'Bills merged successfully',
+      message: 'Bills merged successfully into single consolidated bill',
       data: mergedBill
     });
   } catch (error) {
@@ -1201,7 +1330,7 @@ exports.applyDiscount = async (req, res) => {
       sBill.finalAmount = calculated.finalAmount;
       sBill.balanceDue = Math.max(0, calculated.finalAmount - sBill.amountPaid);
 
-      if (sBill._id && !sBill.isNew && typeof sBill.save === 'function') {
+      if (sBill._id && typeof sBill.save === 'function') {
         try { await sBill.save(); } catch (e) {}
       }
     }
@@ -1272,7 +1401,7 @@ exports.applyComplimentary = async (req, res) => {
       bill.balanceDue = Math.max(0, calculated.finalAmount - bill.amountPaid);
     }
 
-    if (bill._id && !bill.isNew && typeof bill.save === 'function') {
+    if (bill._id && typeof bill.save === 'function') {
       try { await bill.save(); } catch (e) {}
     }
     return res.json({ success: true, message: 'Complimentary settings updated', data: bill });
@@ -1348,7 +1477,7 @@ exports.applyNonChargeable = async (req, res) => {
       bill.balanceDue = Math.max(0, calculated.finalAmount - bill.amountPaid);
     }
 
-    if (bill._id && !bill.isNew && typeof bill.save === 'function') {
+    if (bill._id && typeof bill.save === 'function') {
       try { await bill.save(); } catch (e) {}
     }
     return res.json({ success: true, message: 'Non-Chargeable status updated', data: bill });
@@ -1363,11 +1492,85 @@ exports.applyNonChargeable = async (req, res) => {
 // @access  Private
 exports.toggleTaxAndServiceCharge = async (req, res) => {
   try {
-    const { taxesEnabled, serviceChargeEnabled, serviceChargeRate } = req.body;
-    let bill = await Bill.findById(req.params.id);
+    const { taxesEnabled, serviceChargeEnabled, serviceChargeRate, billNumber, orderId, tableId, items } = req.body;
+    let bill = null;
+
+    if (mongoose.Types.ObjectId.isValid(req.params.id)) {
+      bill = await Bill.findById(req.params.id);
+    }
+
+    if (!bill) {
+      bill = await Bill.findOne({
+        $or: [
+          { billNumber: req.params.id },
+          ...(billNumber ? [{ billNumber }] : []),
+          ...(orderId ? [{ orders: orderId }] : []),
+          ...(mongoose.Types.ObjectId.isValid(req.params.id) ? [{ orders: req.params.id }] : [])
+        ]
+      });
+    }
 
     if (!bill) {
       bill = await resolveBillObject(req.params.id);
+    }
+
+    if (!bill && billNumber) {
+      bill = await resolveBillObject(billNumber);
+    }
+
+    if (!bill && orderId) {
+      bill = await resolveBillObject(orderId);
+    }
+
+    if (!bill && tableId) {
+      bill = await resolveBillObject(tableId);
+    }
+
+    // Fallback: If still not found and items are provided in req.body, construct and save the bill
+    if (!bill && Array.isArray(items) && items.length > 0) {
+      const calculated = await calculateBillTotals(items, {
+        taxesEnabled: typeof taxesEnabled === 'boolean' ? taxesEnabled : true,
+        serviceChargeEnabled: typeof serviceChargeEnabled === 'boolean' ? serviceChargeEnabled : true,
+        customServiceChargeRate: typeof serviceChargeRate === 'number' ? serviceChargeRate : 5
+      });
+      const generatedNo = billNumber || await generateBillNumber();
+
+      bill = new Bill({
+        _id: mongoose.Types.ObjectId.isValid(req.params.id) ? req.params.id : new mongoose.Types.ObjectId(),
+        billNumber: generatedNo,
+        orders: orderId ? [orderId] : [],
+        table: tableId || undefined,
+        items: calculated.items,
+        subtotal: calculated.subtotal,
+        cgstAmount: calculated.cgstAmount,
+        sgstAmount: calculated.sgstAmount,
+        vatAmount: calculated.vatAmount,
+        totalTaxAmount: calculated.totalTaxAmount,
+        serviceChargeRate: calculated.serviceChargeRate,
+        serviceChargeAmount: calculated.serviceChargeAmount,
+        serviceChargeEnabled: typeof serviceChargeEnabled === 'boolean' ? serviceChargeEnabled : true,
+        taxesEnabled: typeof taxesEnabled === 'boolean' ? taxesEnabled : true,
+        finalAmount: calculated.finalAmount,
+        balanceDue: calculated.finalAmount,
+        paymentStatus: 'Pending',
+        status: 'Active',
+        createdBy: req.user?._id
+      });
+      await bill.save();
+    }
+
+    // Fallback 2: Check most recent active order if bill is still missing
+    if (!bill) {
+      const recentOrder = await Order.findOne({ status: { $ne: 'Cancelled' } })
+        .sort({ updatedAt: -1 })
+        .populate('items.menuItem')
+        .populate({ path: 'table', populate: { path: 'floor' } });
+      if (recentOrder) {
+        bill = await resolveBillObject(recentOrder._id);
+        if (bill && mongoose.Types.ObjectId.isValid(req.params.id)) {
+          bill._id = req.params.id;
+        }
+      }
     }
 
     if (!bill) {
@@ -1395,10 +1598,10 @@ exports.toggleTaxAndServiceCharge = async (req, res) => {
     bill.serviceChargeRate = calculated.serviceChargeRate;
     bill.serviceChargeAmount = calculated.serviceChargeAmount;
     bill.finalAmount = calculated.finalAmount;
-    bill.balanceDue = Math.max(0, calculated.finalAmount - bill.amountPaid);
+    bill.balanceDue = Math.max(0, calculated.finalAmount - (bill.amountPaid || 0));
 
-    if (bill._id && !bill.isNew && typeof bill.save === 'function') {
-      try { await bill.save(); } catch (e) {}
+    if (bill._id && typeof bill.save === 'function') {
+      try { await bill.save(); } catch (e) { console.error('Failed to save bill on toggle charges:', e); }
     }
 
     let allSplits = [];
@@ -1432,7 +1635,7 @@ exports.toggleTaxAndServiceCharge = async (req, res) => {
         sib.serviceChargeRate = sibCalc.serviceChargeRate;
         sib.serviceChargeAmount = sibCalc.serviceChargeAmount;
         sib.finalAmount = sibCalc.finalAmount;
-        sib.balanceDue = Math.max(0, sibCalc.finalAmount - sib.amountPaid);
+        sib.balanceDue = Math.max(0, sibCalc.finalAmount - (sib.amountPaid || 0));
         await sib.save();
       }
 
@@ -1442,11 +1645,15 @@ exports.toggleTaxAndServiceCharge = async (req, res) => {
       }).populate('table').populate('session').populate('orders').populate('createdBy', 'name role');
     }
 
-    const populatedBill = await Bill.findById(bill._id)
-      .populate('table')
-      .populate('session')
-      .populate('orders')
-      .populate('createdBy', 'name role');
+    let populatedBill = null;
+    if (bill._id) {
+      populatedBill = await Bill.findById(bill._id)
+        .populate('table')
+        .populate('session')
+        .populate('orders')
+        .populate('createdBy', 'name role');
+    }
+    if (!populatedBill) populatedBill = bill;
 
     return res.json({
       success: true,
@@ -1696,6 +1903,20 @@ exports.recordPayment = async (req, res) => {
       }
     }
 
+    if (!bill.coveredTables || bill.coveredTables.length === 0) {
+      const orderIds = (bill.orders || []).map(o => o._id || o);
+      if (orderIds.length > 0) {
+        const trOrder = await Order.findOne({ _id: { $in: orderIds }, coveredTables: { $exists: true, $ne: [] } });
+        if (trOrder && trOrder.coveredTables && trOrder.coveredTables.length > 1) {
+          bill.coveredTables = trOrder.coveredTables;
+          bill.transferredFromTable = trOrder.transferredFromTable;
+          if (!bill.notes) {
+            bill.notes = `Covers ${trOrder.coveredTables.length} tables: ${trOrder.coveredTables.join(' & ')} (Transferred)`;
+          }
+        }
+      }
+    }
+
     if (!payments || !Array.isArray(payments) || payments.length === 0) {
       return res.status(400).json({ success: false, message: 'At least one payment method details required' });
     }
@@ -1769,11 +1990,20 @@ exports.recordPayment = async (req, res) => {
         }
       }
 
-      // Check if all active bills for this table are paid or settled
+      // Check if all active bills for tables involved in this bill are paid or settled
+      const tablesToCheck = new Set();
       const targetTableId = bill.table?._id || bill.table;
-      if (targetTableId) {
+      if (targetTableId) tablesToCheck.add(String(targetTableId));
+      if (bill.orders && bill.orders.length > 0) {
+        const relatedOrders = await Order.find({ _id: { $in: bill.orders } }, 'table');
+        relatedOrders.forEach(ro => {
+          if (ro.table) tablesToCheck.add(String(ro.table));
+        });
+      }
+
+      for (const tId of tablesToCheck) {
         const remainingUnpaid = await Bill.countDocuments({
-          table: targetTableId,
+          table: tId,
           _id: { $ne: bill._id },
           status: 'Active',
           paymentStatus: { $nin: ['Paid', 'Non-Chargeable'] }
@@ -1781,18 +2011,18 @@ exports.recordPayment = async (req, res) => {
 
         if (remainingUnpaid === 0) {
           const updatedTable = await Table.findByIdAndUpdate(
-            targetTableId,
+            tId,
             { status: 'Available', currentSession: null },
             { new: true }
           );
           if (io && updatedTable) {
             io.emit('table_status_changed', updatedTable);
             io.emit('table_status_updated', updatedTable);
-            io.emit('table_payment_completed', { tableId: targetTableId, billId: bill._id, tableNumber: updatedTable.tableNumber || updatedTable.name });
-            io.emit('table_payment_received', { tableId: targetTableId, billId: bill._id, tableNumber: updatedTable.tableNumber || updatedTable.name });
+            io.emit('table_payment_completed', { tableId: tId, billId: bill._id, tableNumber: updatedTable.tableNumber || updatedTable.name });
+            io.emit('table_payment_received', { tableId: tId, billId: bill._id, tableNumber: updatedTable.tableNumber || updatedTable.name });
           } else if (io) {
-            io.emit('table_payment_completed', { tableId: targetTableId, billId: bill._id });
-            io.emit('table_payment_received', { tableId: targetTableId, billId: bill._id });
+            io.emit('table_payment_completed', { tableId: tId, billId: bill._id });
+            io.emit('table_payment_received', { tableId: tId, billId: bill._id });
           }
         }
       }
@@ -1863,42 +2093,227 @@ exports.getBillingAnalytics = async (req, res) => {
 // @access  Private
 exports.getDailySalesReport = async (req, res) => {
   try {
-    const { date, startDate, endDate } = req.query;
+    const { date, startDate, endDate, timezoneOffset } = req.query;
 
-    let start = new Date();
-    let end = new Date();
+    let start, end;
+
+    // Timezone offset in minutes (e.g. -330 for UTC+05:30 IST)
+    const tzOffsetMinutes = timezoneOffset !== undefined && !isNaN(Number(timezoneOffset)) 
+      ? Number(timezoneOffset) 
+      : -330;
+    const tzOffsetMs = tzOffsetMinutes * 60 * 1000;
+
+    const now = new Date();
+    const localNow = new Date(now.getTime() - tzOffsetMs);
+    const todayY = localNow.getUTCFullYear();
+    const todayM = localNow.getUTCMonth() + 1;
+    const todayD = localNow.getUTCDate();
+    const todayDateStr = `${todayY}-${String(todayM).padStart(2, '0')}-${String(todayD).padStart(2, '0')}`;
+
+    let isCurrentDay = false;
 
     if (date) {
-      start = new Date(date);
-      start.setHours(0, 0, 0, 0);
-      end = new Date(date);
-      end.setHours(23, 59, 59, 999);
+      if (date === todayDateStr) {
+        isCurrentDay = true;
+      }
+      const parts = String(date).split('-');
+      if (parts.length === 3) {
+        const [year, month, day] = parts.map(Number);
+        // Start of selected local day converted to UTC
+        start = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0) + tzOffsetMs);
+        // End of selected local day converted to UTC
+        end = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999) + tzOffsetMs);
+      } else {
+        start = new Date(date);
+        start.setHours(0, 0, 0, 0);
+        end = new Date(date);
+        end.setHours(23, 59, 59, 999);
+      }
     } else if (startDate && endDate) {
       start = new Date(startDate);
-      start.setHours(0, 0, 0, 0);
       end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
     } else {
-      start.setHours(0, 0, 0, 0);
-      end.setHours(23, 59, 59, 999);
+      isCurrentDay = true;
+      start = new Date(Date.UTC(todayY, todayM - 1, todayD, 0, 0, 0, 0) + tzOffsetMs);
+      end = new Date(Date.UTC(todayY, todayM - 1, todayD, 23, 59, 59, 999) + tzOffsetMs);
     }
 
-    const dateFilter = { createdAt: { $gte: start, $lte: end } };
+    // Expand start to active business day shift if open and user is auditing today's business
+    try {
+      const BusinessDay = require('../models/BusinessDay');
+      const activeDay = await BusinessDay.findOne({ status: 'Open' });
+      if (activeDay && activeDay.startTime) {
+        const shiftStart = new Date(activeDay.startTime);
+        if (isCurrentDay || shiftStart < start) {
+          if (shiftStart < start) {
+            start = shiftStart;
+          }
+          if (now > end) {
+            end = new Date(now.getTime() + 60 * 1000);
+          }
+        }
+      }
+    } catch (bErr) {}
 
-    // Fetch All Bills for the day
-    const bills = await Bill.find(dateFilter)
+    // Fallback: If querying today/recent and 0 orders found in strict window, expand to include last 24 hours
+    if (isCurrentDay) {
+      const testOrdersCount = await Order.countDocuments({
+        $or: [
+          { createdAt: { $gte: start, $lte: end } },
+          { updatedAt: { $gte: start, $lte: end } }
+        ]
+      });
+      const testBillsCount = await Bill.countDocuments({
+        $or: [
+          { createdAt: { $gte: start, $lte: end } },
+          { updatedAt: { $gte: start, $lte: end } }
+        ]
+      });
+
+      if (testOrdersCount === 0 && testBillsCount === 0) {
+        const recentOrders = await Order.find({
+          createdAt: { $gte: new Date(Date.now() - 24 * 3600 * 1000) }
+        }).sort({ createdAt: 1 }).limit(1);
+
+        if (recentOrders.length > 0) {
+          const earliest = new Date(recentOrders[0].createdAt);
+          if (earliest < start) {
+            start = earliest;
+          }
+          end = new Date(Date.now() + 3600 * 1000);
+        }
+      }
+    }
+
+    const dateFilter = {
+      $or: [
+        { createdAt: { $gte: start, $lte: end } },
+        { updatedAt: { $gte: start, $lte: end } }
+      ]
+    };
+
+    // Fetch All Orders placed for the day (Running Sales of the Day)
+    const orders = await Order.find({
+      $or: [
+        { createdAt: { $gte: start, $lte: end } },
+        { 'paymentDetails.paidAt': { $gte: start, $lte: end } },
+        { updatedAt: { $gte: start, $lte: end } }
+      ]
+    })
       .populate('table')
-      .populate('generatedBy', 'name role email')
+      .populate('waiter', 'name role')
+      .sort({ createdAt: -1 });
+
+    const orderIds = orders.map(o => o._id);
+    const orderBillIds = orders.filter(o => o.bill).map(o => o.bill);
+
+    // Fetch All Bills for the day (including bills matching date or referencing today's orders)
+    const bills = await Bill.find({
+      $or: [
+        { createdAt: { $gte: start, $lte: end } },
+        { updatedAt: { $gte: start, $lte: end } },
+        { orders: { $in: orderIds } },
+        { _id: { $in: orderBillIds } }
+      ]
+    })
+      .populate('table')
+      .populate('createdBy', 'name role email')
       .populate('ncEmployee', 'name role')
       .sort({ createdAt: -1 });
 
     // Fetch Spoilage Records
-    const spoilages = await FoodSpoilage.find(dateFilter).sort({ createdAt: -1 });
+    let spoilages = await FoodSpoilage.find(dateFilter).sort({ createdAt: -1 });
+    if (spoilages.length === 0 && isCurrentDay) {
+      spoilages = await FoodSpoilage.find({
+        createdAt: { $gte: new Date(Date.now() - 24 * 3600 * 1000) }
+      }).sort({ createdAt: -1 });
+    }
 
     // Fetch Audit Logs for edits, voids, cancellations, discounts, SC removal
-    const auditLogs = await AuditLog.find(dateFilter)
+    const auditLogs = await AuditLog.find({
+      $or: [
+        { createdAt: { $gte: start, $lte: end } },
+        { updatedAt: { $gte: start, $lte: end } }
+      ]
+    })
       .populate('employeeId', 'name role')
       .sort({ createdAt: -1 });
+
+    // Calculate Running Sales from unpaid placed orders of the day
+    let runningSales = 0;
+    let runningOrdersCount = 0;
+    let cancelledOrdersCount = 0;
+    const runningOrdersList = [];
+    const cancellationLogs = [];
+
+    // Build a map/set of order IDs whose bills are Paid or Non-Chargeable
+    const paidOrderIds = new Set();
+    const unpaidBillMap = new Map();
+
+    bills.forEach(b => {
+      // Merged constituent bills are superseded by the parent merged bill
+      if (b.status === 'Merged' || b.paymentStatus === 'Merged') {
+        return;
+      }
+      const isBillPaid = b.paymentStatus === 'Paid' || b.paymentStatus === 'Non-Chargeable' || b.status === 'Settled' || b.status === 'Paid';
+      if (isBillPaid) {
+        (b.orders || []).forEach(oId => paidOrderIds.add(String(oId)));
+      } else if (b.status !== 'Voided' && b.status !== 'Cancelled') {
+        (b.orders || []).forEach(oId => {
+          if (!unpaidBillMap.has(String(oId))) {
+            unpaidBillMap.set(String(oId), b);
+          }
+        });
+      }
+    });
+
+    orders.forEach(ord => {
+      const isCancelled = ord.status === 'Cancelled';
+      if (isCancelled) {
+        cancelledOrdersCount++;
+        cancellationLogs.push({
+          billNumber: ord.orderId,
+          tableName: ord.table?.tableNumber ? `Table ${ord.table.tableNumber}` : (ord.table?.name || 'Dine-In'),
+          finalAmount: ord.total || ord.subtotal || 0,
+          status: 'Cancelled (Order)',
+          reason: ord.cancelledReason || 'Order Cancelled',
+          staff: ord.waiter?.name || 'Staff',
+          timestamp: ord.cancelledAt || ord.updatedAt || ord.createdAt
+        });
+        return;
+      }
+
+      // Check if this order or its bill is already paid
+      const isPaid = ord.paymentStatus === 'Paid' || ord.paymentStatus === 'Non-Chargeable' || paidOrderIds.has(String(ord._id));
+      if (isPaid) {
+        // Once bill is paid, do not show in Running Sale of the Day (only unpaid bills are shown here)
+        return;
+      }
+
+      runningOrdersCount++;
+      const orderActiveItems = (ord.items || []).filter(item => item.status !== 'Cancelled');
+      const orderItemsTotal = orderActiveItems.reduce((sum, item) => sum + (item.isSpoiled ? 0 : (item.totalPrice || (item.unitPrice * item.quantity) || 0)), 0);
+      
+      const unpaidBill = unpaidBillMap.get(String(ord._id));
+      const orderAmount = unpaidBill?.finalAmount || orderItemsTotal || ord.total || ord.subtotal || 0;
+
+      runningSales += orderAmount;
+
+      runningOrdersList.push({
+        _id: ord._id,
+        orderId: ord.orderId,
+        billNumber: unpaidBill?.billNumber || null,
+        tableName: ord.table?.tableNumber ? `Table ${ord.table.tableNumber}` : (ord.table?.name || 'Dine-In'),
+        source: ord.source || 'Waiter',
+        status: ord.status,
+        paymentStatus: 'Unpaid',
+        itemCount: orderActiveItems.length,
+        itemsSummary: orderActiveItems.map(i => `${i.quantity}x ${i.foodName || 'Item'}`).join(', '),
+        amount: orderAmount,
+        waiter: ord.waiter?.name || 'Staff',
+        timestamp: ord.createdAt
+      });
+    });
 
     // Summary Aggregations
     let grossSales = 0;
@@ -1908,7 +2323,7 @@ exports.getDailySalesReport = async (req, res) => {
     let totalServiceCharge = 0;
     let totalTaxes = 0;
     let netCollection = 0;
-    let totalBillsCount = bills.length;
+    let totalBillsCount = bills.filter(b => b.status !== 'Merged' && b.paymentStatus !== 'Merged').length;
     let voidedBillsCount = 0;
     let cancelledBillsCount = 0;
     let serviceChargeRemovalsCount = 0;
@@ -1917,26 +2332,65 @@ exports.getDailySalesReport = async (req, res) => {
     const discountReport = [];
     const ncReport = [];
     const modificationLogs = [];
-    const cancellationLogs = [];
     const scRemovalLogs = [];
     const spoilageLogs = [];
 
-    // Calculate Spoilage Total
+    // Calculate Spoilage Total from FoodSpoilage collection
     spoilages.forEach(s => {
-      totalSpoilageValue += (s.totalLossAmount || 0);
+      const lossAmt = Number(s.totalLossAmount || (s.unitPrice * s.quantity) || s.totalCost || s.cost || 0);
+      totalSpoilageValue += lossAmt;
       spoilageLogs.push({
         _id: s._id,
-        itemName: s.itemName,
-        quantity: s.quantity,
+        foodName: s.foodName || s.itemName || 'Spoiled Item',
+        itemName: s.foodName || s.itemName || 'Spoiled Item',
+        quantity: s.quantity || 1,
         unit: s.unit || 'pcs',
-        totalLossAmount: s.totalLossAmount,
-        spoilageRemarks: s.reason || s.spoilageRemarks || 'Marked spoiled',
-        spoilageMarkedBy: s.recordedByName || 'Staff',
+        totalLossAmount: lossAmt,
+        spoilageRemarks: s.remarks || s.reason || s.spoilageRemarks || 'Marked spoiled',
+        spoilageMarkedBy: s.markedBy || s.recordedByName || 'Staff',
+        tableInfo: s.tableNumber ? `Table ${s.tableNumber}` : (s.tableName || ''),
+        orderId: s.orderId || '',
         timestamp: s.createdAt
       });
     });
 
+    // Also include any order items marked spoiled
+    orders.forEach(ord => {
+      (ord.items || []).forEach(item => {
+        if (item.isSpoiled) {
+          const itemLoss = Number(item.totalPrice || (item.unitPrice * item.quantity) || 0);
+          const alreadyLogged = spoilageLogs.some(log => 
+            (log.orderId && log.orderId === ord.orderId && log.itemName === (item.foodName || item.itemName)) ||
+            (log._id && item._id && log._id.toString() === item._id.toString())
+          );
+          if (!alreadyLogged) {
+            totalSpoilageValue += itemLoss;
+            spoilageLogs.push({
+              _id: item._id || ord._id,
+              foodName: item.foodName || 'Item',
+              itemName: item.foodName || 'Item',
+              quantity: item.quantity || 1,
+              unit: 'pcs',
+              totalLossAmount: itemLoss,
+              spoilageRemarks: item.spoilageRemarks || 'Marked spoiled on order',
+              spoilageMarkedBy: item.spoilageMarkedBy || 'Staff',
+              tableInfo: ord.table?.tableNumber ? `Table ${ord.table.tableNumber}` : '',
+              orderId: ord.orderId,
+              timestamp: ord.createdAt
+            });
+          }
+        }
+      });
+    });
+
+    const countedOrderIds = new Set();
+
     bills.forEach(bill => {
+      // Merged constituent bills are superseded by the parent merged bill
+      if (bill.status === 'Merged' || bill.paymentStatus === 'Merged') {
+        return;
+      }
+
       const isCancelled = bill.status === 'Cancelled' || bill.paymentStatus === 'Cancelled';
       const isVoided = bill.status === 'Voided' || bill.paymentStatus === 'Voided';
 
@@ -1948,7 +2402,7 @@ exports.getDailySalesReport = async (req, res) => {
           finalAmount: bill.finalAmount,
           status: 'Cancelled',
           reason: bill.notes || bill.cancelReason || 'Bill Cancelled',
-          staff: bill.generatedBy?.name || 'Staff',
+          staff: bill.createdBy?.name || bill.discountGivenBy || 'Staff',
           timestamp: bill.updatedAt || bill.createdAt
         });
         return;
@@ -1962,7 +2416,7 @@ exports.getDailySalesReport = async (req, res) => {
           finalAmount: bill.finalAmount,
           status: 'Voided',
           reason: bill.notes || bill.voidReason || 'Bill Voided',
-          staff: bill.generatedBy?.name || 'Staff',
+          staff: bill.createdBy?.name || bill.discountGivenBy || 'Staff',
           timestamp: bill.updatedAt || bill.createdAt
         });
         return;
@@ -1973,62 +2427,84 @@ exports.getDailySalesReport = async (req, res) => {
       totalTaxes += (bill.totalTaxAmount || 0);
       netCollection += (bill.amountPaid || bill.finalAmount || 0);
 
-      // Discounts
-      const discAmt = (bill.billDiscountAmount || 0) + (bill.itemLevelDiscounts || 0);
-      if (discAmt > 0 || bill.billDiscountType !== 'None') {
+      (bill.orders || []).forEach(oId => {
+        if (oId) countedOrderIds.add(oId.toString());
+      });
+
+      // Discounts on Bill
+      let discAmt = Number((bill.billDiscountAmount || 0) + (bill.itemLevelDiscounts || 0));
+      if (discAmt <= 0 && Number(bill.billDiscountValue || 0) > 0 && bill.billDiscountType !== 'None' && bill.billDiscountType !== 'Non-Chargeable') {
+        const baseSubtotal = (bill.items || []).reduce((s, it) => s + ((it.unitPrice || 0) * (it.quantity || 1)), 0) || bill.subtotal || 0;
+        if (bill.billDiscountType === 'Percentage') {
+          discAmt = (baseSubtotal * Number(bill.billDiscountValue)) / 100;
+        } else if (bill.billDiscountType === 'Fixed') {
+          discAmt = Number(bill.billDiscountValue);
+        }
+      }
+
+      if (discAmt > 0) {
         totalDiscounts += discAmt;
         discountReport.push({
           billNumber: bill.billNumber,
-          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : 'Dine-In',
-          subtotal: bill.subtotal,
-          discountType: bill.billDiscountType,
-          discountValue: bill.billDiscountValue,
+          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : (bill.table?.name || 'Dine-In'),
+          subtotal: bill.subtotal || 0,
+          discountType: bill.billDiscountType || 'Discount',
+          discountValue: bill.billDiscountValue || discAmt,
           discountAmount: discAmt,
           reason: bill.billDiscountReason || 'Customer Discount',
-          staff: bill.generatedBy?.name || 'Staff',
+          staff: bill.createdBy?.name || bill.discountGivenBy || 'Staff',
           timestamp: bill.createdAt
         });
       }
 
-      // Non-Chargeable / Complimentary
-      if (bill.isNonChargeableBill || bill.isComplimentaryBill || bill.paymentStatus === 'Non-Chargeable') {
-        const ncVal = bill.subtotal || bill.finalAmount || 0;
+      // Non-Chargeable / Complimentary Bill
+      const isNCBill = bill.isNonChargeableBill || 
+                       bill.isComplimentaryBill || 
+                       bill.paymentStatus === 'Non-Chargeable' || 
+                       bill.billDiscountType === 'Non-Chargeable' ||
+                       (bill.payments || []).some(p => p.mode === 'NC');
+
+      if (isNCBill) {
+        const originalItemVal = (bill.items || []).reduce((s, it) => s + ((it.unitPrice || 0) * (it.quantity || 1)), 0);
+        const ncVal = originalItemVal || bill.subtotal || bill.finalAmount || 0;
         totalNonChargeable += ncVal;
         ncReport.push({
           billNumber: bill.billNumber,
-          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : 'Dine-In',
-          type: bill.isComplimentaryBill ? 'Complimentary' : 'Non-Chargeable',
+          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : (bill.table?.name || 'Dine-In'),
+          itemName: 'Full Bill NC',
+          type: bill.isComplimentaryBill ? 'Complimentary Bill' : 'Non-Chargeable Bill',
           value: ncVal,
-          reason: bill.ncStaffRemark || bill.complimentaryBillRemark || 'NC Staff Order',
-          staff: bill.ncEmployee?.name || bill.generatedBy?.name || 'Staff',
+          reason: bill.ncStaffRemark || bill.complimentaryBillRemark || bill.notes || 'NC Staff Order',
+          staff: bill.ncEmployee?.name || bill.createdBy?.name || bill.discountGivenBy || 'Staff',
           timestamp: bill.createdAt
         });
       }
 
-      // Individual NC / Complimentary Items inside normal bills
+      // Individual NC / Complimentary Items inside bills
       (bill.items || []).forEach(item => {
         if (item.isSpoiled) {
-          totalSpoilageValue += (item.unitPrice * item.quantity);
+          totalSpoilageValue += ((item.unitPrice || 0) * (item.quantity || 1));
           spoilageLogs.push({
             billNumber: bill.billNumber,
             itemName: item.foodName,
             quantity: item.quantity,
             unit: 'pcs',
-            totalLossAmount: (item.unitPrice * item.quantity),
+            totalLossAmount: ((item.unitPrice || 0) * (item.quantity || 1)),
             spoilageRemarks: item.spoilageRemarks || 'Spoiled dish on bill',
             spoilageMarkedBy: item.spoilageMarkedBy || 'Staff',
             timestamp: bill.createdAt
           });
-        } else if (item.isNonChargeable || item.isComplimentary) {
-          totalNonChargeable += (item.unitPrice * item.quantity);
+        } else if (!isNCBill && (item.isNonChargeable || item.isComplimentary)) {
+          const itemVal = (item.unitPrice || 0) * (item.quantity || 1);
+          totalNonChargeable += itemVal;
           ncReport.push({
             billNumber: bill.billNumber,
-            tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : 'Dine-In',
+            tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : (bill.table?.name || 'Dine-In'),
             itemName: item.foodName,
             type: item.isComplimentary ? 'Item Complimentary' : 'Item NC',
-            value: item.unitPrice * item.quantity,
+            value: itemVal,
             reason: item.ncRemark || item.complimentaryReason || 'Item waived',
-            staff: item.staffEmployeeId || 'Staff',
+            staff: item.staffEmployeeId || bill.createdBy?.name || 'Staff',
             timestamp: bill.createdAt
           });
         }
@@ -2045,7 +2521,7 @@ exports.getDailySalesReport = async (req, res) => {
           subtotal: bill.subtotal,
           waivedAmount,
           reason: 'Service Charge Waived/Removed by Staff',
-          staff: bill.generatedBy?.name || 'Staff',
+          staff: bill.createdBy?.name || bill.discountGivenBy || 'Staff',
           timestamp: bill.createdAt
         });
       } else {
@@ -2064,6 +2540,99 @@ exports.getDailySalesReport = async (req, res) => {
       }
     });
 
+    // Also attribute revenue and audit NC/complimentary/discounts from Orders
+    orders.forEach(ord => {
+      const isOrdNC = ord.paymentStatus === 'Non-Chargeable' || ord.paymentMethod === 'NC' || ord.paymentMethod === 'Non-Chargeable';
+      const isPaid = ord.paymentStatus === 'Paid' || ord.status === 'Completed' || isOrdNC;
+      const linkedBill = bills.find(b => 
+        (b.orders || []).some(oId => String(oId) === String(ord._id)) || 
+        (ord.bill && String(b._id) === String(ord.bill))
+      );
+
+      // Check if order was whole Non-Chargeable
+      if (isOrdNC) {
+        const alreadyLogged = ncReport.some(log => 
+          log.billNumber === ord.orderId || 
+          (linkedBill && log.billNumber === linkedBill.billNumber)
+        );
+        if (!alreadyLogged) {
+          const itemVal = (ord.items || []).reduce((s, it) => s + ((it.unitPrice || 0) * (it.quantity || 1)), 0);
+          const ordVal = itemVal || ord.total || ord.subtotal || 0;
+          totalNonChargeable += ordVal;
+          ncReport.push({
+            billNumber: ord.orderId,
+            tableName: ord.table?.tableNumber ? `Table ${ord.table.tableNumber}` : (ord.table?.name || 'Dine-In'),
+            itemName: 'Full Order NC',
+            type: 'Order Non-Chargeable',
+            value: ordVal,
+            reason: ord.customerNotes || 'Order marked NC',
+            staff: ord.waiter?.name || 'Staff',
+            timestamp: ord.createdAt
+          });
+        }
+      }
+
+      // Check for individual complimentary or NC items on order
+      (ord.items || []).forEach(item => {
+        if (!isOrdNC && (item.isComplimentary || item.isNonChargeable)) {
+          const alreadyLogged = ncReport.some(log => 
+            (log.billNumber === ord.orderId || (linkedBill && log.billNumber === linkedBill.billNumber)) && 
+            log.itemName === (item.foodName || item.itemName)
+          );
+          if (!alreadyLogged) {
+            const itemVal = ((item.unitPrice || 0) * (item.quantity || 1));
+            totalNonChargeable += itemVal;
+            ncReport.push({
+              _id: item._id,
+              billNumber: ord.orderId,
+              tableName: ord.table?.tableNumber ? `Table ${ord.table.tableNumber}` : (ord.table?.name || 'Dine-In'),
+              itemName: item.foodName || item.menuItem?.foodName || 'Item',
+              type: item.isComplimentary ? 'Item Complimentary' : 'Item NC',
+              value: itemVal,
+              reason: item.ncRemark || item.complimentaryReason || item.notes || 'Complimentary Item',
+              staff: ord.waiter?.name || 'Staff',
+              timestamp: ord.createdAt
+            });
+          }
+        }
+      });
+
+      // Check for order-level discounts
+      const ordDiscAmt = Number(ord.discountAmount || ord.discount || 0);
+      if (ordDiscAmt > 0) {
+        const alreadyLogged = discountReport.some(log => 
+          log.billNumber === ord.orderId || 
+          (linkedBill && log.billNumber === linkedBill.billNumber)
+        );
+        if (!alreadyLogged) {
+          totalDiscounts += ordDiscAmt;
+          discountReport.push({
+            billNumber: ord.orderId,
+            tableName: ord.table?.tableNumber ? `Table ${ord.table.tableNumber}` : (ord.table?.name || 'Dine-In'),
+            subtotal: ord.subtotal || ord.total || 0,
+            discountType: ord.discountType || 'Order Discount',
+            discountValue: ordDiscAmt,
+            discountAmount: ordDiscAmt,
+            reason: ord.discountReason || 'Order Discount',
+            staff: ord.waiter?.name || 'Staff',
+            timestamp: ord.createdAt
+          });
+        }
+      }
+
+      // Revenue accounting for standalone paid orders without a separate Bill
+      if (!countedOrderIds.has(ord._id.toString()) && isPaid && !isOrdNC) {
+        const ordActiveItems = (ord.items || []).filter(i => i.status !== 'Cancelled');
+        const itemsTotal = ordActiveItems.reduce((sum, i) => sum + (i.totalPrice || (i.unitPrice * i.quantity) || 0), 0);
+        const ordAmount = ord.total || itemsTotal || ord.subtotal || 0;
+        const ordTax = ord.tax || 0;
+
+        grossSales += (ord.subtotal || (ordAmount - ordTax));
+        totalTaxes += ordTax;
+        netCollection += ordAmount;
+      }
+    });
+
     // Also include AuditLog entries for bill modifications & void events
     auditLogs.forEach(log => {
       if (log.action && (log.action.includes('Bill') || log.action.includes('Order') || log.action.includes('Discount') || log.action.includes('Void'))) {
@@ -2075,6 +2644,22 @@ exports.getDailySalesReport = async (req, res) => {
           timestamp: log.createdAt
         });
       }
+      const act = (log.action || '').toLowerCase();
+      if (act.includes('service charge') || act.includes('sc removed') || act.includes('sc waived')) {
+        const already = scRemovalLogs.some(l => l.billNumber === log.entityId);
+        if (!already) {
+          serviceChargeRemovalsCount++;
+          scRemovalLogs.push({
+            billNumber: log.entityId || 'Log',
+            tableName: 'Audit Record',
+            subtotal: 0,
+            waivedAmount: 0,
+            reason: log.details || log.description || 'Service Charge Waived',
+            staff: log.employeeId?.name || 'Staff',
+            timestamp: log.createdAt
+          });
+        }
+      }
     });
 
     return res.status(200).json({
@@ -2085,6 +2670,10 @@ exports.getDailySalesReport = async (req, res) => {
           endDate: end
         },
         summary: {
+          runningSales,
+          runningOrdersCount,
+          totalOrdersCount: orders.length,
+          cancelledOrdersCount,
           grossSales,
           totalDiscounts,
           totalNonChargeable,
@@ -2099,6 +2688,7 @@ exports.getDailySalesReport = async (req, res) => {
           cancelledBillsCount
         },
         reports: {
+          runningOrdersList,
           discountReport,
           ncReport,
           modificationLogs,

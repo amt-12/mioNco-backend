@@ -462,14 +462,40 @@ exports.transferTablePublic = async (req, res, next) => {
 
         // If source table exists, transfer all active records
         if (sourceTable && String(sourceTable._id) !== String(targetTable._id)) {
-            // 1. Transfer Active Orders
+            const sourceTName = String(sourceTable.tableNumber || sourceTable.name || 'Table');
+            const targetTName = String(targetTable.tableNumber || targetTable.name || 'Table');
+            const sourceFloorName = sourceTable.floor?.name || '';
+            const targetFloorName = targetTable.floor?.name || '';
+
+            const transferInfo = {
+                tableId: sourceTable._id,
+                tableNumber: sourceTName,
+                tableName: sourceTable.name || `Table ${sourceTName}`,
+                floorName: sourceFloorName
+            };
+
+            // 1. Fetch Active Orders
             const activeOrders = await Order.find({
                 table: sourceTable._id,
                 status: { $nin: ['Completed', 'Cancelled'] }
             });
 
+            let coveredList = [];
+            const prevCovered = activeOrders.find(o => o.coveredTables && o.coveredTables.length > 0)?.coveredTables || [];
+            if (prevCovered.length > 0) {
+                coveredList = [...new Set([...prevCovered, `Table ${targetTName}`])];
+            } else {
+                coveredList = [
+                    `Table ${sourceTName}`,
+                    `Table ${targetTName}`
+                ];
+            }
+            const coversNote = `Covers ${coveredList.length} tables: ${coveredList.join(' & ')} (Transferred)`;
+
             for (const ord of activeOrders) {
                 ord.table = targetTable._id;
+                ord.transferredFromTable = transferInfo;
+                ord.coveredTables = coveredList;
                 if (customerDoc) {
                     ord.customer = customerDoc._id;
                     ord.customerPhone = customerDoc.phone;
@@ -486,6 +512,8 @@ exports.transferTablePublic = async (req, res, next) => {
             for (const sess of sourceSessions) {
                 sess.table = targetTable._id;
                 sess.floor = targetTable.floor?._id || targetTable.floor;
+                sess.transferredFromTable = transferInfo;
+                sess.coveredTables = coveredList;
                 if (customerDoc) {
                     sess.customer = customerDoc._id;
                     sess.customerPhone = customerDoc.phone;
@@ -499,6 +527,9 @@ exports.transferTablePublic = async (req, res, next) => {
                 {
                     table: targetTable._id,
                     floor: targetTable.floor?._id || targetTable.floor,
+                    transferredFromTable: transferInfo,
+                    coveredTables: coveredList,
+                    notes: coversNote,
                     ...(customerDoc ? {
                         'customer.name': customerDoc.name,
                         'customer.phone': customerDoc.phone
@@ -562,22 +593,26 @@ exports.transferTablePublic = async (req, res, next) => {
                 fromTableNumber: popSource ? String(popSource.tableNumber) : String(fromTableId),
                 toTableId: String(popTarget._id),
                 toTableNumber: String(popTarget.tableNumber),
+                targetFloorId: popTarget.floor?._id ? String(popTarget.floor._id) : '',
                 targetFloorName: popTarget.floor?.name || '',
-                targetFloorSlug: popTarget.floor?.slug || popTarget.floor?.name || ''
+                targetFloorSlug: popTarget.floor?.slug || (popTarget.floor?.name ? popTarget.floor.name.toLowerCase().replace(/\s+/g, '-') : '')
             };
             io.emit('table_transferred', transferPayload);
 
             if (popSource) {
-                io.emit('table_status_changed', popSource);
-                io.emit('table_status_updated', popSource);
-                io.emit('table_updated', popSource);
-                io.emit('table_orders_updated', { tableId: popSource._id });
+                const sourceObj = popSource.toObject();
+                sourceObj.isTransfer = true;
+                sourceObj.transferredTo = popTarget.tableNumber;
+                sourceObj.transferredToId = popTarget._id;
+                io.emit('table_status_changed', sourceObj);
+                io.emit('table_status_updated', sourceObj);
+                io.emit('table_updated', sourceObj);
+                io.emit('table_orders_updated', { tableId: popSource._id, isTransfer: true });
             }
             io.emit('table_status_changed', popTarget);
             io.emit('table_status_updated', popTarget);
             io.emit('table_updated', popTarget);
             io.emit('new_air_menu_order', { table: popTarget });
-            io.emit('order_status_updated', { table: popTarget });
             io.emit('table_orders_updated', { tableId: popTarget._id });
             io.emit('tables_updated');
         }

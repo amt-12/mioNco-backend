@@ -65,6 +65,13 @@ exports.getPublicSettings = async (req, res, next) => {
                     closedDates: [],
                     closedDaysOfWeek: [],
                     closureMessage: 'Reservations are currently closed for this date. Please contact our reception desk at +91 172 4087077.'
+                },
+                airMenuSettings: settings.airMenuSettings || {
+                    backgroundImage: '',
+                    backgroundOpacity: 1,
+                    backgroundBlur: 0,
+                    blackOverlayOpacity: 0.55,
+                    isActive: true
                 }
             }
         });
@@ -81,12 +88,8 @@ exports.updateSettings = async (req, res, next) => {
         let settings = await getOrCreateSettings();
         
         // We do a deep merge or simply replace sections provided in body
-        // Since the frontend sends the whole updated section, we can use findOneAndUpdate
-        const updatedFields = { ...req.body, updatedBy: req.user.id };
+        const updatedFields = { ...req.body, updatedBy: req.user?.id || req.user?._id };
         
-        // To handle nested updates correctly with mongoose, we can use dot notation,
-        // but for simplicity, we allow replacing entire top-level sections (e.g. body.profile)
-        // Mongoose will handle the merge if we just assign it.
         Object.keys(updatedFields).forEach(key => {
             if (key !== 'isSingleton' && key !== '_id') {
                 settings[key] = updatedFields[key];
@@ -94,6 +97,14 @@ exports.updateSettings = async (req, res, next) => {
         });
         
         await settings.save();
+
+        if (updatedFields.airMenuSettings) {
+            try {
+                req.app.get('io')?.emit('airMenuSettingsUpdated', settings.airMenuSettings);
+            } catch (socketErr) {
+                console.error('Socket emission error for airMenuSettingsUpdated:', socketErr);
+            }
+        }
         
         res.status(200).json({ success: true, data: settings });
     } catch (error) {

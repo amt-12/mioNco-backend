@@ -63,14 +63,22 @@ exports.login = async (req, res, next) => {
         let user = await User.findOne({
             $or: [
                 { employeeId: loginRegex },
-                { email: loginRegex }
+                { employeeId: new RegExp(`${escaped}$`, 'i') },
+                { email: loginRegex },
+                { name: loginRegex }
             ]
         }).select('+password');
 
         // 2. If not found in User, check EmployeeProfile and link userAccount if available
         if (!user) {
             const EmployeeProfile = require('../models/EmployeeProfile');
-            const emp = await EmployeeProfile.findOne({ employeeId: loginRegex });
+            const emp = await EmployeeProfile.findOne({
+                $or: [
+                    { employeeId: loginRegex },
+                    { employeeId: new RegExp(`${escaped}$`, 'i') },
+                    { email: loginRegex }
+                ]
+            });
             if (emp && emp.userAccount) {
                 user = await User.findById(emp.userAccount).select('+password');
                 if (user && !user.employeeId) {

@@ -160,6 +160,13 @@ const billSchema = new mongoose.Schema({
   },
   
   createdBy: { type: mongoose.Schema.ObjectId, ref: 'User' },
+  transferredFromTable: {
+    tableId: { type: mongoose.Schema.ObjectId, ref: 'Table' },
+    tableNumber: String,
+    tableName: String,
+    floorName: String
+  },
+  coveredTables: [{ type: String }],
   notes: String
 }, {
   timestamps: true

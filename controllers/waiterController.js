@@ -37,9 +37,9 @@ exports.assignWaiter = async (req, res) => {
 exports.getActiveWaiters = async (req, res) => {
     try {
         const waiters = await User.find({ 
-            role: { $in: ['Waiter', 'Restaurant Manager', 'Waiter Manager'] },
+            role: { $in: ['Waiter', 'Restaurant Manager', 'Waiter Manager', 'admin', 'Super Admin', 'super_admin', 'Cashier'] },
             status: { $ne: 'Inactive' }
-        }).select('name email role status');
+        }).select('name email role status employeeId');
         
         const tables = await Table.find().populate('floor', 'name');
         

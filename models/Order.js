@@ -153,7 +153,14 @@ const orderSchema = new mongoose.Schema({
         cardType: String,
         cardRef: String,
         paidAt: Date
-    }
+    },
+    transferredFromTable: {
+        tableId: { type: mongoose.Schema.ObjectId, ref: 'Table' },
+        tableNumber: String,
+        tableName: String,
+        floorName: String
+    },
+    coveredTables: [{ type: String }]
 }, {
     timestamps: true
 });

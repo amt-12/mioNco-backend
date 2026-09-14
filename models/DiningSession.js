@@ -46,7 +46,14 @@ const diningSessionSchema = new mongoose.Schema({
     totalAmount: {
         type: Number,
         default: 0
-    }
+    },
+    transferredFromTable: {
+        tableId: { type: mongoose.Schema.ObjectId, ref: 'Table' },
+        tableNumber: String,
+        tableName: String,
+        floorName: String
+    },
+    coveredTables: [{ type: String }]
 }, {
     timestamps: true
 });

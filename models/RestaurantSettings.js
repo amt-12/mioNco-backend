@@ -106,6 +106,13 @@ const restaurantSettingsSchema = new mongoose.Schema({
         defaultVATPercent: { type: Number, default: 18.9 },
         enableOTPForSensitiveActions: { type: Boolean, default: false }
     },
+    airMenuSettings: {
+        backgroundImage: { type: String, default: '' },
+        backgroundOpacity: { type: Number, default: 1 },
+        backgroundBlur: { type: Number, default: 0 },
+        blackOverlayOpacity: { type: Number, default: 0.55 },
+        isActive: { type: Boolean, default: true }
+    },
     updatedBy: {
         type: mongoose.Schema.ObjectId,
         ref: 'User'
