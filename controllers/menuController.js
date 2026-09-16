@@ -90,6 +90,28 @@ exports.deleteSection = async (req, res) => {
   }
 };
 
+exports.reorderSections = async (req, res) => {
+  try {
+    const { orders } = req.body; // array of { id, displayOrder }
+    if (!Array.isArray(orders)) {
+      return res.status(400).json({ success: false, message: 'Invalid payload: orders array expected' });
+    }
+    const bulkOps = orders.map(item => ({
+      updateOne: {
+        filter: { _id: item.id || item._id },
+        update: { $set: { displayOrder: Number(item.displayOrder) } }
+      }
+    }));
+    if (bulkOps.length > 0) {
+      await MenuSection.bulkWrite(bulkOps);
+    }
+    const updatedSections = await MenuSection.find().populate('floors', 'name floorNumber').sort({ displayOrder: 1, createdAt: 1 });
+    res.status(200).json({ success: true, message: 'Sections reordered successfully', data: updatedSections });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // --- MENU CATEGORIES ---
 exports.getCategories = async (req, res) => {
   try {

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const {
-  getSections, createSection, updateSection, deleteSection,
+  getSections, createSection, updateSection, deleteSection, reorderSections,
   getCategories, createCategory, updateCategory, deleteCategory,
   getItems, getItem, createItem, updateItem, deleteItem,
   getMenuAnalytics
@@ -12,6 +12,8 @@ router.route('/analytics').get(getMenuAnalytics);
 router.route('/sections')
   .get(getSections)
   .post(createSection);
+
+router.put('/sections/reorder', reorderSections);
 
 router.route('/sections/:id')
   .put(updateSection)
