@@ -45,6 +45,11 @@ exports.getTables = async (req, res, next) => {
             return tObj;
         });
 
+        // Natural alphanumeric sort (e.g. B1, B2, ... B9, B10 instead of B1, B10, B2)
+        processedTables.sort((a, b) => {
+            return String(a.tableNumber || '').localeCompare(String(b.tableNumber || ''), undefined, { numeric: true, sensitivity: 'base' });
+        });
+
         res.status(200).json({ success: true, count: processedTables.length, data: processedTables });
     } catch (error) {
         next(error);
