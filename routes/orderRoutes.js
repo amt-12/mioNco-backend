@@ -12,7 +12,8 @@ const {
     removeOrderItem,
     addOrderItem,
     getOnRequestAuditLogs,
-    getPopularItemsByFloor
+    getPopularItemsByFloor,
+    printKotDirectly
 } = require('../controllers/orderController');
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
@@ -32,6 +33,7 @@ router.get('/popular-by-floor', authorize('Super Admin', 'super_admin', 'admin',
 router.get('/on-request-audit', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getOnRequestAuditLogs);
 
 router.post('/', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), createOrder);
+router.post('/print-kot', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Kitchen Staff', 'Waiter', 'Receptionist'), printKotDirectly);
 
 router.get('/', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Kitchen Staff', 'Waiter', 'Receptionist'), getOrders);
 

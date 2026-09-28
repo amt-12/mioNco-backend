@@ -443,7 +443,8 @@ exports.createOrder = async (req, res) => {
             .populate('waiter', 'name')
             .populate({
                 path: 'items.menuItem',
-                select: 'foodName displayName sku'
+                select: 'foodName displayName sku categories section kitchenStation basePrice',
+                populate: { path: 'section', select: 'name defaultPrinter floors' }
             });
 
         const io = req.app.get('io');
@@ -522,7 +523,8 @@ exports.getOrders = async (req, res) => {
             .populate('items.addedBy', 'name email role')
             .populate({
                 path: 'items.menuItem',
-                select: 'foodName displayName sku categories'
+                select: 'foodName displayName sku categories section kitchenStation basePrice',
+                populate: { path: 'section', select: 'name defaultPrinter floors' }
             })
             .sort({ createdAt: -1 });
 
@@ -610,7 +612,8 @@ exports.updateOrderStatus = async (req, res) => {
             .populate('waiter', 'name')
             .populate({
                 path: 'items.menuItem',
-                select: 'foodName displayName'
+                select: 'foodName displayName sku categories section kitchenStation basePrice',
+                populate: { path: 'section', select: 'name defaultPrinter floors' }
             });
 
         const io = req.app.get('io');
@@ -676,7 +679,8 @@ exports.updateOrderItemStatus = async (req, res) => {
             .populate('waiter', 'name')
             .populate({
                 path: 'items.menuItem',
-                select: 'foodName displayName kitchenStation'
+                select: 'foodName displayName sku categories section kitchenStation basePrice',
+                populate: { path: 'section', select: 'name defaultPrinter floors' }
             });
 
         const io = req.app.get('io');
@@ -795,7 +799,8 @@ exports.rejectItem = async (req, res) => {
             .populate('waiter', 'name')
             .populate({
                 path: 'items.menuItem',
-                select: 'foodName displayName kitchenStation'
+                select: 'foodName displayName sku categories section kitchenStation basePrice',
+                populate: { path: 'section', select: 'name defaultPrinter floors' }
             });
 
         const io = req.app.get('io');
@@ -843,7 +848,8 @@ exports.recallItem = async (req, res) => {
             .populate('waiter', 'name')
             .populate({
                 path: 'items.menuItem',
-                select: 'foodName displayName kitchenStation'
+                select: 'foodName displayName sku categories section kitchenStation basePrice',
+                populate: { path: 'section', select: 'name defaultPrinter floors' }
             });
 
         const io = req.app.get('io');
@@ -1253,3 +1259,109 @@ exports.getPopularItemsByFloor = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+// @desc    Direct Network ESC/POS KOT Printing (Raw TCP to Port 9100)
+// @route   POST /api/v1/orders/print-kot
+// @access  Private
+exports.printKotDirectly = async (req, res) => {
+    try {
+        const {
+            printerIp,
+            orderId = 'ORD',
+            tableName = 'N/A',
+            floorName = '',
+            covers = 1,
+            serverName = 'Staff',
+            priority = 'Normal',
+            ticketTitle = 'KOT',
+            notes = '',
+            items = []
+        } = req.body;
+
+        if (!printerIp) {
+            return res.status(400).json({ success: false, message: 'Printer IP is required' });
+        }
+
+        const net = require('net');
+        const cleanHost = printerIp.replace(/^https?:\/\//i, '').split('/')[0].split(':')[0].trim();
+        const port = Number(printerIp.split(':')[1]) || 9100;
+
+        // Build ESC/POS Byte Stream
+        const ESC = '\x1B';
+        const GS = '\x1D';
+
+        let escBuffer = '';
+        escBuffer += ESC + '@'; // Initialize printer
+        escBuffer += ESC + 'a' + '\x01'; // Center alignment
+        escBuffer += ESC + 'E' + '\x01'; // Bold on
+        escBuffer += 'MIO & CO. BISTRO\n';
+        escBuffer += '================================\n';
+        escBuffer += `${ticketTitle || 'KOT'}\n`;
+        escBuffer += '================================\n';
+        escBuffer += ESC + 'E' + '\x00'; // Bold off
+
+        escBuffer += ESC + 'a' + '\x00'; // Left align
+        escBuffer += `Order #: ${orderId}  Priority: ${priority}\n`;
+        escBuffer += `Table: ${tableName}${floorName ? ` (${floorName})` : ''}  Covers: ${covers}\n`;
+        escBuffer += `Time: ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}  Date: ${new Date().toLocaleDateString('en-GB')}\n`;
+        escBuffer += `Server: ${serverName}\n`;
+        escBuffer += `DESTINATION: ${cleanHost}:${port}\n`;
+        escBuffer += '--------------------------------\n';
+        escBuffer += 'QTY   ITEM & INSTRUCTIONS\n';
+        escBuffer += '--------------------------------\n';
+
+        (items || []).forEach(it => {
+            const qty = it.quantity || 1;
+            const name = it.foodName || it.name || it.displayName || 'Item';
+            const itemNotes = it.notes || it.reason || '';
+            escBuffer += `${qty}x   ${name}\n`;
+            if (itemNotes) {
+                escBuffer += `      Note: ${itemNotes}\n`;
+            }
+        });
+
+        escBuffer += '--------------------------------\n';
+        if (notes) {
+            escBuffer += `Note: ${notes}\n`;
+            escBuffer += '--------------------------------\n';
+        }
+        escBuffer += ESC + 'a' + '\x01'; // Center
+        escBuffer += '*** END OF KOT TICKET ***\n\n\n\n\n';
+        escBuffer += GS + 'V' + '\x41' + '\x10'; // Cut paper
+
+        const client = new net.Socket();
+        client.setTimeout(2500);
+
+        let finished = false;
+
+        client.connect(port, cleanHost, () => {
+            client.write(Buffer.from(escBuffer, 'utf8'), () => {
+                finished = true;
+                client.end();
+                res.status(200).json({ success: true, message: `Sent KOT directly to printer at ${cleanHost}:${port}` });
+            });
+        });
+
+        client.on('error', (err) => {
+            if (!finished) {
+                finished = true;
+                client.destroy();
+                console.warn(`Direct TCP print to ${cleanHost}:${port} failed:`, err.message);
+                res.status(200).json({ success: false, fallbackToBrowser: true, message: `Could not connect to ${cleanHost}:${port} (${err.message}). Using browser print fallback.` });
+            }
+        });
+
+        client.on('timeout', () => {
+            if (!finished) {
+                finished = true;
+                client.destroy();
+                console.warn(`Direct TCP print to ${cleanHost}:${port} timed out.`);
+                res.status(200).json({ success: false, fallbackToBrowser: true, message: `Connection to ${cleanHost}:${port} timed out. Using browser print fallback.` });
+            }
+        });
+    } catch (error) {
+        console.error('Error in printKotDirectly:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
