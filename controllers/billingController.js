@@ -8,14 +8,86 @@ const RestaurantSettings = require('../models/RestaurantSettings');
 const Table = require('../models/Table');
 const FoodSpoilage = require('../models/FoodSpoilage');
 const AuditLog = require('../models/AuditLog');
+const Floor = require('../models/Floor');
 
-// Helper to generate Unique Bill Number
-const generateBillNumber = async () => {
+// Helper to determine Floor Prefix for Bill Number (e.g. BIS- for Bistro)
+const resolveFloorPrefix = async (floorHint) => {
+  try {
+    if (!floorHint) return 'BILL-';
+
+    let floorName = '';
+
+    if (typeof floorHint === 'string') {
+      const trimmed = floorHint.trim();
+      const lowerTrimmed = trimmed.toLowerCase();
+      if (lowerTrimmed.includes('bistro') || lowerTrimmed.includes('ground')) return 'BIS-';
+      if (lowerTrimmed.includes('palazzo') || lowerTrimmed.includes('basement')) return 'PAL-';
+      if (lowerTrimmed.includes('priv') || lowerTrimmed.includes('prive') || lowerTrimmed.includes('first')) return 'PRI-';
+      if (lowerTrimmed.includes('elite') || lowerTrimmed.includes('second')) return 'ELI-';
+      if (lowerTrimmed.includes('skybar') || lowerTrimmed.includes('sky') || lowerTrimmed.includes('terrace') || lowerTrimmed.includes('rooftop')) return 'SKY-';
+
+      if (mongoose.Types.ObjectId.isValid(trimmed)) {
+        const floorDoc = await Floor.findById(trimmed);
+        if (floorDoc && floorDoc.name) {
+          floorName = floorDoc.name;
+        } else {
+          const tableDoc = await Table.findById(trimmed).populate('floor');
+          if (tableDoc?.floor) {
+            floorName = typeof tableDoc.floor === 'object' ? tableDoc.floor.name : (await Floor.findById(tableDoc.floor))?.name || '';
+          } else {
+            const orderDoc = await Order.findById(trimmed).populate({ path: 'table', populate: { path: 'floor' } });
+            if (orderDoc?.table?.floor) {
+              floorName = typeof orderDoc.table.floor === 'object' ? orderDoc.table.floor.name : (await Floor.findById(orderDoc.table.floor))?.name || '';
+            } else if (orderDoc?.transferredFromTable?.floorName) {
+              floorName = orderDoc.transferredFromTable.floorName;
+            }
+          }
+        }
+      }
+    } else if (typeof floorHint === 'object') {
+      if (floorHint.floorName) {
+        floorName = floorHint.floorName;
+      } else if (floorHint.name && !floorHint.tableNumber) {
+        floorName = floorHint.name;
+      } else if (floorHint.floor) {
+        if (typeof floorHint.floor === 'object' && floorHint.floor.name) {
+          floorName = floorHint.floor.name;
+        } else {
+          const fDoc = await Floor.findById(floorHint.floor);
+          if (fDoc?.name) floorName = fDoc.name;
+        }
+      } else if (floorHint.table) {
+        const tDoc = await Table.findById(floorHint.table._id || floorHint.table).populate('floor');
+        if (tDoc?.floor) {
+          floorName = typeof tDoc.floor === 'object' ? tDoc.floor.name : (await Floor.findById(tDoc.floor))?.name || '';
+        }
+      } else if (floorHint.transferredFromTable?.floorName) {
+        floorName = floorHint.transferredFromTable.floorName;
+      }
+    }
+
+    const lower = (floorName || '').toLowerCase();
+    if (lower.includes('bistro') || lower.includes('ground')) return 'BIS-';
+    if (lower.includes('palazzo') || lower.includes('basement')) return 'PAL-';
+    if (lower.includes('priv') || lower.includes('prive') || lower.includes('first')) return 'PRI-';
+    if (lower.includes('elite') || lower.includes('second')) return 'ELI-';
+    if (lower.includes('skybar') || lower.includes('sky') || lower.includes('terrace') || lower.includes('rooftop')) return 'SKY-';
+
+    return 'BILL-';
+  } catch (err) {
+    console.error('Error resolving floor prefix for bill:', err);
+    return 'BILL-';
+  }
+};
+
+// Helper to generate Unique Bill Number with floor prefix
+const generateBillNumber = async (floorHint = null) => {
+  const prefix = await resolveFloorPrefix(floorHint);
   const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   let number = '';
   let isUnique = false;
   while (!isUnique) {
-    number = 'BILL-';
+    number = prefix;
     for (let i = 0; i < 6; i++) {
       number += chars.charAt(Math.floor(Math.random() * chars.length));
     }
@@ -262,6 +334,19 @@ const resolveBillObject = async (idParam) => {
   }
 
   if (b) {
+    // If existing bill has a generic BILL- prefix but floor is Bistro or known floor, auto-correct it
+    if (b.billNumber && b.billNumber.startsWith('BILL-')) {
+      const expectedPrefix = await resolveFloorPrefix(b.table);
+      if (expectedPrefix && expectedPrefix !== 'BILL-') {
+        const newNo = b.billNumber.replace(/^BILL-/, expectedPrefix);
+        const clash = await Bill.findOne({ billNumber: newNo });
+        if (!clash) {
+          b.billNumber = newNo;
+          await b.save();
+        }
+      }
+    }
+
     if (!b.coveredTables || b.coveredTables.length === 0) {
       const orderIds = (b.orders || []).map(o => o._id || o);
       if (orderIds.length > 0) {
@@ -307,7 +392,7 @@ const resolveBillObject = async (idParam) => {
         }));
 
       const calculated = await calculateBillTotals(rawItems);
-      const billNumber = ord.orderId || await generateBillNumber();
+      const billNumber = ord.orderId || await generateBillNumber(ord.table || ord);
 
       b = new Bill({
         _id: ord._id,
@@ -367,7 +452,7 @@ const resolveBillObject = async (idParam) => {
       });
 
       const calculated = await calculateBillTotals(rawItems);
-      const billNumber = await generateBillNumber();
+      const billNumber = await generateBillNumber(activeOrders[0]?.table || idStr);
 
       const transferredOrd = activeOrders.find(o => o.transferredFromTable || (o.coveredTables && o.coveredTables.length > 1));
       let transferredInfo = transferredOrd?.transferredFromTable;
@@ -416,7 +501,7 @@ const resolveBillObject = async (idParam) => {
 // @access  Private
 exports.generateBill = async (req, res) => {
   try {
-    const { orderId, orderIds, sessionId, tableId, customer } = req.body;
+    const { orderId, orderIds, sessionId, tableId, floorId, floor, customer } = req.body;
 
     // Check if active bill(s) already exist for the given order or table
     let existingQuery = null;
@@ -437,10 +522,23 @@ exports.generateBill = async (req, res) => {
         .sort({ createdAt: -1 });
 
       if (existingBills.length > 0) {
+        const firstBill = existingBills[0];
+        // If existing active bill has a generic BILL- prefix but floor is Bistro or known floor, auto-correct it
+        if (firstBill.billNumber && firstBill.billNumber.startsWith('BILL-')) {
+          const expectedPrefix = await resolveFloorPrefix(floorId || floor || req.body.floorName || firstBill.table || tableId);
+          if (expectedPrefix && expectedPrefix !== 'BILL-') {
+            const newNumber = firstBill.billNumber.replace(/^BILL-/, expectedPrefix);
+            const clash = await Bill.findOne({ billNumber: newNumber });
+            if (!clash) {
+              firstBill.billNumber = newNumber;
+              await firstBill.save();
+            }
+          }
+        }
         return res.status(200).json({
           success: true,
           message: 'Active bill(s) already exist',
-          data: existingBills[0],
+          data: firstBill,
           allBills: existingBills
         });
       }
@@ -495,7 +593,8 @@ exports.generateBill = async (req, res) => {
     });
 
     const calculated = await calculateBillTotals(rawItems);
-    const billNumber = await generateBillNumber();
+    const floorHint = floorId || floor || req.body.floorName || tableId || targetOrders[0]?.table || targetOrders[0];
+    const billNumber = await generateBillNumber(floorHint);
 
     const transferredOrd = targetOrders.find(o => o.transferredFromTable || (o.coveredTables && o.coveredTables.length > 1));
     let transferredInfo = transferredOrd?.transferredFromTable;
@@ -741,7 +840,7 @@ exports.splitBill = async (req, res) => {
           }));
 
         const calculated = await calculateBillTotals(rawItems);
-        const billNumber = ord.orderId || await generateBillNumber();
+        const billNumber = ord.orderId || await generateBillNumber(ord.table || ord);
 
         targetBill = new Bill({
           _id: ord._id,
@@ -796,7 +895,7 @@ exports.splitBill = async (req, res) => {
         });
 
         const calculated = await calculateBillTotals(rawItems);
-        const billNumber = await generateBillNumber();
+        const billNumber = await generateBillNumber(activeOrders[0]?.table || req.params.id);
 
         targetBill = new Bill({
           _id: activeOrders[0]._id,
@@ -850,7 +949,7 @@ exports.splitBill = async (req, res) => {
     }
 
     const createdSplitBills = [];
-    const freshBasePrefix = await generateBillNumber();
+    const freshBasePrefix = await generateBillNumber(parentBill?.table || parentBill);
 
     if (splitType === 'Equal' || !itemAllocations || !Array.isArray(itemAllocations) || itemAllocations.length === 0) {
       const equalCount = Math.max(2, parseInt(splitCount) || 2);
@@ -1066,7 +1165,7 @@ exports.mergeBills = async (req, res) => {
               }));
 
             const calculated = await calculateBillTotals(rawItems);
-            const billNumber = ord.orderId || await generateBillNumber();
+            const billNumber = ord.orderId || await generateBillNumber(ord.table || ord);
 
             b = {
               _id: ord._id,
@@ -1171,7 +1270,7 @@ exports.mergeBills = async (req, res) => {
 
     const mergedItems = Array.from(itemMap.values());
     const calculated = await calculateBillTotals(mergedItems);
-    const billNumber = await generateBillNumber();
+    const billNumber = await generateBillNumber(firstBill?.table || billsToMerge[0]?.table);
 
     const firstBill = billsToMerge[0];
     const mergeNotesText = tableDescriptions.length > 0
@@ -1533,7 +1632,7 @@ exports.toggleTaxAndServiceCharge = async (req, res) => {
         serviceChargeEnabled: typeof serviceChargeEnabled === 'boolean' ? serviceChargeEnabled : true,
         customServiceChargeRate: typeof serviceChargeRate === 'number' ? serviceChargeRate : 5
       });
-      const generatedNo = billNumber || await generateBillNumber();
+      const generatedNo = billNumber || await generateBillNumber(tableId || orderId);
 
       bill = new Bill({
         _id: mongoose.Types.ObjectId.isValid(req.params.id) ? req.params.id : new mongoose.Types.ObjectId(),
@@ -1774,6 +1873,65 @@ exports.voidBill = async (req, res) => {
   }
 };
 
+// @desc    Delete Bill Permanently
+// @route   DELETE /api/v1/billing/:id
+// @access  Private (Admin / Manager)
+exports.deleteBill = async (req, res) => {
+  try {
+    const bill = await Bill.findById(req.params.id);
+
+    if (!bill) {
+      return res.status(404).json({ success: false, message: 'Bill not found' });
+    }
+
+    const billNumber = bill.billNumber;
+    const billId = bill._id;
+
+    if (req.user?._id) {
+      try {
+        await AuditLog.create({
+          employeeId: req.user._id,
+          employeeName: req.user.name || req.user.username || 'Staff',
+          action: 'Delete',
+          entityType: 'Bill',
+          entityId: billId,
+          previousValue: {
+            billNumber,
+            finalAmount: bill.finalAmount,
+            status: bill.status,
+            paymentStatus: bill.paymentStatus
+          },
+          updatedValue: null,
+          ipAddress: req.ip || req.headers['x-forwarded-for'] || ''
+        });
+      } catch (logErr) {
+        console.error('AuditLog error deleting bill:', logErr);
+      }
+    }
+
+    await bill.deleteOne();
+
+    try {
+      const io = req.app.get('io') || req.app.get('socketio');
+      if (io) {
+        io.emit('bill_deleted', { billId, billNumber });
+        io.emit('billing_updated');
+      }
+    } catch (sockErr) {
+      console.error('Socket error emitting bill_deleted:', sockErr);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Bill ${billNumber} deleted successfully`,
+      data: { id: billId, billNumber }
+    });
+  } catch (error) {
+    console.error('Error deleting bill:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // @desc    Log Reprint & Increment Reprint Count
 // @route   POST /api/v1/billing/:id/reprint
 // @access  Private
@@ -1857,7 +2015,7 @@ exports.recordPayment = async (req, res) => {
         discountType: billData?.discountType || 'None',
         discountValue: Number(billData?.discountValue) || 0
       });
-      const billNumber = billData?.billNumber || await generateBillNumber();
+      const billNumber = billData?.billNumber || await generateBillNumber(targetTable || tableId || req.body.floorId);
 
       bill = new Bill({
         _id: mongoose.Types.ObjectId.isValid(req.params.id) ? req.params.id : new mongoose.Types.ObjectId(),

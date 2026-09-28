@@ -15,7 +15,8 @@ const {
   reprintBill,
   recordPayment,
   getBillingAnalytics,
-  getDailySalesReport
+  getDailySalesReport,
+  deleteBill
 } = require('../controllers/billingController');
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
@@ -41,6 +42,7 @@ router.put('/:id/toggle-charges', authorize('Super Admin', 'super_admin', 'admin
 router.put('/:id/modify', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), modifyBill);
 router.post('/:id/cancel', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), cancelBill);
 router.post('/:id/void', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), voidBill);
+router.delete('/:id', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), deleteBill);
 router.post('/:id/reprint', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), reprintBill);
 router.post('/:id/payment', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), recordPayment);
 

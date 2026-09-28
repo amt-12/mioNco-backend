@@ -13,6 +13,13 @@ const app = express();
 
 // Middlewares
 app.use(helmet({ crossOriginResourcePolicy: false }));
+app.use((req, res, next) => {
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()');
+  next();
+});
 app.use(cors({
   origin: [
     'http://localhost:5173',

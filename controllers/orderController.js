@@ -1026,12 +1026,19 @@ exports.removeOrderItem = async (req, res) => {
         const order = await Order.findById(orderId);
         if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-        order.items = order.items.filter(i => i._id.toString() !== itemId);
+        const removedItem = order.items.find(i => String(i._id) === String(itemId) || String(i.id) === String(itemId));
+        order.items = order.items.filter(i => String(i._id) !== String(itemId) && String(i.id) !== String(itemId));
         
         // Recalculate subtotal & total
         order.subTotal = order.items.reduce((acc, i) => acc + (i.totalPrice || (i.quantity * (i.unitPrice || 0))), 0);
+        order.subtotal = order.subTotal;
         order.total = Math.max(0, order.subTotal + (order.tax || 0) + (order.serviceCharge || 0) - (order.discount || 0));
         
+        // If all items removed, mark order as Cancelled
+        if (order.items.length === 0) {
+            order.status = 'Cancelled';
+        }
+
         await order.save();
 
         const populatedOrder = await Order.findById(order._id)
@@ -1040,9 +1047,22 @@ exports.removeOrderItem = async (req, res) => {
             .populate('items.menuItem');
 
         const io = req.app.get('io');
-        if (io) io.emit('order_status_updated', populatedOrder);
+        if (io) {
+            io.emit('order_status_updated', populatedOrder);
+            io.emit('order_item_status_updated', populatedOrder);
+            io.emit('kitchen_order_updated', populatedOrder);
+            io.emit('order_updated', populatedOrder);
+            io.emit('kot_item_cancelled', {
+                orderId: populatedOrder.orderId,
+                order: populatedOrder,
+                cancelledItem: removedItem
+            });
+            if (order.table) {
+                io.emit('table_orders_updated', { tableId: order.table });
+            }
+        }
 
-        res.status(200).json({ success: true, data: populatedOrder });
+        res.status(200).json({ success: true, data: populatedOrder, removedItem });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
