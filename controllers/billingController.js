@@ -2445,6 +2445,7 @@ exports.getDailySalesReport = async (req, res) => {
     const modificationLogs = [];
     const scRemovalLogs = [];
     const spoilageLogs = [];
+    const paymentMethodsMap = {};
 
     // Calculate Spoilage Total from FoodSpoilage collection
     spoilages.forEach(s => {
@@ -2536,7 +2537,26 @@ exports.getDailySalesReport = async (req, res) => {
       // Valid Active / Paid / Settled Bill
       grossSales += (bill.subtotal || 0);
       totalTaxes += (bill.totalTaxAmount || 0);
-      netCollection += (bill.amountPaid || bill.finalAmount || 0);
+      const settledAmt = bill.amountPaid || bill.finalAmount || 0;
+      netCollection += settledAmt;
+
+      const isPaidBill = bill.paymentStatus === 'Paid' || settledAmt > 0;
+      if (isPaidBill && bill.paymentStatus !== 'Non-Chargeable' && !bill.isNonChargeableBill) {
+        if (bill.payments && bill.payments.length > 0) {
+          bill.payments.forEach(p => {
+            const mode = p.mode || 'Cash';
+            const amt = Number(p.amount) || 0;
+            if (!paymentMethodsMap[mode]) paymentMethodsMap[mode] = { mode, totalAmount: 0, count: 0 };
+            paymentMethodsMap[mode].totalAmount += amt;
+            paymentMethodsMap[mode].count += 1;
+          });
+        } else {
+          const mode = bill.paymentMethod || 'Cash';
+          if (!paymentMethodsMap[mode]) paymentMethodsMap[mode] = { mode, totalAmount: 0, count: 0 };
+          paymentMethodsMap[mode].totalAmount += settledAmt;
+          paymentMethodsMap[mode].count += 1;
+        }
+      }
 
       (bill.orders || []).forEach(oId => {
         if (oId) countedOrderIds.add(oId.toString());
@@ -2741,6 +2761,11 @@ exports.getDailySalesReport = async (req, res) => {
         grossSales += (ord.subtotal || (ordAmount - ordTax));
         totalTaxes += ordTax;
         netCollection += ordAmount;
+
+        const mode = ord.paymentMethod || 'Cash';
+        if (!paymentMethodsMap[mode]) paymentMethodsMap[mode] = { mode, totalAmount: 0, count: 0 };
+        paymentMethodsMap[mode].totalAmount += ordAmount;
+        paymentMethodsMap[mode].count += 1;
       }
     });
 
@@ -2817,7 +2842,12 @@ exports.getDailySalesReport = async (req, res) => {
           netCollection,
           totalBillsCount,
           voidedBillsCount,
-          cancelledBillsCount
+          cancelledBillsCount,
+          paymentMethodsBreakdown: Object.values(paymentMethodsMap).map(pm => ({
+            mode: pm.mode,
+            totalAmount: Number(pm.totalAmount.toFixed(2)),
+            count: pm.count
+          }))
         },
         reports: {
           billsList,
