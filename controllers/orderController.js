@@ -33,7 +33,9 @@ const consolidateActiveTableOrders = async (tableId, sessionId) => {
         const activeOrders = await Order.find({
             table: tableId,
             session: sessionId,
-            status: { $nin: ['Completed', 'Cancelled'] }
+            status: { $nin: ['Completed', 'Cancelled', 'Void', 'Voided'] },
+            isVoided: { $ne: true },
+            isDeleted: { $ne: true }
         }).sort({ createdAt: 1 });
 
         if (activeOrders.length <= 1) return activeOrders[0] || null;
@@ -49,8 +51,16 @@ const consolidateActiveTableOrders = async (tableId, sessionId) => {
         let itemsAppended = false;
         for (const redOrder of redundantOrders) {
             if (redOrder.items && redOrder.items.length > 0) {
-                masterOrder.items.push(...redOrder.items);
-                itemsAppended = true;
+                const activeItems = redOrder.items.filter(i => 
+                    !i.isSpoiled && 
+                    i.status !== 'Cancelled' && 
+                    i.status !== 'Void' && 
+                    i.status !== 'Voided'
+                );
+                if (activeItems.length > 0) {
+                    masterOrder.items.push(...activeItems);
+                    itemsAppended = true;
+                }
             }
             if (redOrder.customerNotes && !masterOrder.customerNotes?.includes(redOrder.customerNotes)) {
                 masterOrder.customerNotes = masterOrder.customerNotes 
@@ -65,7 +75,7 @@ const consolidateActiveTableOrders = async (tableId, sessionId) => {
             let subtotal = 0;
             let totalTax = 0;
             masterOrder.items.forEach(i => {
-                if (i.isSpoiled) return;
+                if (i.isSpoiled || i.status === 'Cancelled' || i.status === 'Void' || i.status === 'Voided') return;
                 const itemTotal = i.totalPrice || (i.unitPrice * i.quantity) || 0;
                 subtotal += itemTotal;
                 const rate = i.taxRate || (i.itemType === 'Liquor' ? defaultVAT : defaultGST);
@@ -494,7 +504,12 @@ exports.getOrders = async (req, res) => {
         
         if (status) {
             query.status = { $in: status.split(',') };
+        } else {
+            query.status = { $nin: ['Cancelled', 'Void', 'Voided'] };
         }
+        query.isVoided = { $ne: true };
+        query.isDeleted = { $ne: true };
+        query.deleted = { $ne: true };
         if (table) {
             const mongoose = require('mongoose');
             let tObj = null;
@@ -1361,6 +1376,140 @@ exports.printKotDirectly = async (req, res) => {
         });
     } catch (error) {
         console.error('Error in printKotDirectly:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// @desc    Get all KOTs sent to kitchen with date range, search, status filters & summary stats
+// @route   GET /api/v1/orders/kots
+// @access  Private
+exports.getKitchenKots = async (req, res) => {
+    try {
+        const { startDate, endDate, date, timezoneOffset, status, priority, search } = req.query;
+
+        const tzOffsetMinutes = timezoneOffset !== undefined && !isNaN(Number(timezoneOffset)) 
+            ? Number(timezoneOffset) 
+            : -330;
+        const tzOffsetMs = tzOffsetMinutes * 60 * 1000;
+
+        const now = new Date();
+        const localNow = new Date(now.getTime() - tzOffsetMs);
+        const todayY = localNow.getUTCFullYear();
+        const todayM = localNow.getUTCMonth() + 1;
+        const todayD = localNow.getUTCDate();
+
+        let start, end;
+
+        if (startDate && endDate) {
+            const sParts = String(startDate).split('-');
+            const eParts = String(endDate).split('-');
+            if (sParts.length === 3 && eParts.length === 3) {
+                const [sY, sM, sD] = sParts.map(Number);
+                const [eY, eM, eD] = eParts.map(Number);
+                start = new Date(Date.UTC(sY, sM - 1, sD, 0, 0, 0, 0) + tzOffsetMs);
+                end = new Date(Date.UTC(eY, eM - 1, eD, 23, 59, 59, 999) + tzOffsetMs);
+            } else {
+                start = new Date(startDate);
+                start.setHours(0, 0, 0, 0);
+                end = new Date(endDate);
+                end.setHours(23, 59, 59, 999);
+            }
+        } else if (date) {
+            const parts = String(date).split('-');
+            if (parts.length === 3) {
+                const [year, month, day] = parts.map(Number);
+                start = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0) + tzOffsetMs);
+                end = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999) + tzOffsetMs);
+            } else {
+                start = new Date(date);
+                start.setHours(0, 0, 0, 0);
+                end = new Date(date);
+                end.setHours(23, 59, 59, 999);
+            }
+        } else {
+            start = new Date(Date.UTC(todayY, todayM - 1, todayD, 0, 0, 0, 0) + tzOffsetMs);
+            end = new Date(Date.UTC(todayY, todayM - 1, todayD, 23, 59, 59, 999) + tzOffsetMs);
+        }
+
+        let query = {
+            createdAt: { $gte: start, $lte: end }
+        };
+
+        if (status && status !== 'all' && status !== 'All') {
+            query.status = { $in: status.split(',') };
+        }
+
+        if (priority && priority !== 'all' && priority !== 'All') {
+            query.priority = priority;
+        }
+
+        const kots = await Order.find(query)
+            .populate({
+                path: 'table',
+                populate: { path: 'floor', select: 'name floorNumber slug' }
+            })
+            .populate('waiter', 'name email role')
+            .populate('items.addedBy', 'name email role')
+            .populate({
+                path: 'items.menuItem',
+                select: 'foodName displayName sku categories section kitchenStation basePrice',
+                populate: { path: 'section', select: 'name defaultPrinter floors' }
+            })
+            .sort({ createdAt: -1 });
+
+        let filteredKots = kots;
+        if (search && search.trim()) {
+            const sTerm = search.trim().toLowerCase();
+            filteredKots = kots.filter(kot => {
+                const orderIdMatch = (kot.orderId || '').toLowerCase().includes(sTerm);
+                const tableMatch = (kot.table?.tableNumber || kot.table?.name || '').toLowerCase().includes(sTerm);
+                const waiterMatch = (kot.waiter?.name || '').toLowerCase().includes(sTerm);
+                const itemMatch = (kot.items || []).some(it => 
+                    (it.foodName || it.menuItem?.foodName || '').toLowerCase().includes(sTerm)
+                );
+                return orderIdMatch || tableMatch || waiterMatch || itemMatch;
+            });
+        }
+
+        let totalItems = 0;
+        let totalQty = 0;
+        let totalValue = 0;
+        let activeKotsCount = 0;
+        let servedKotsCount = 0;
+        let cancelledKotsCount = 0;
+
+        filteredKots.forEach(k => {
+            totalValue += (k.total || k.subtotal || 0);
+            const activeItems = (k.items || []).filter(i => i.status !== 'Cancelled' && !i.isSpoiled);
+            totalItems += activeItems.length;
+            totalQty += activeItems.reduce((sum, i) => sum + (i.quantity || 1), 0);
+
+            if (k.status === 'Cancelled') {
+                cancelledKotsCount++;
+            } else if (k.status === 'Served' || k.status === 'Completed') {
+                servedKotsCount++;
+            } else {
+                activeKotsCount++;
+            }
+        });
+
+        res.status(200).json({
+            success: true,
+            dateRange: { startDate: start, endDate: end },
+            count: filteredKots.length,
+            summary: {
+                totalKots: filteredKots.length,
+                totalItems,
+                totalQty,
+                totalValue,
+                activeKotsCount,
+                servedKotsCount,
+                cancelledKotsCount
+            },
+            data: filteredKots
+        });
+    } catch (error) {
+        console.error('Error in getKitchenKots:', error);
         res.status(500).json({ success: false, message: error.message });
     }
 };

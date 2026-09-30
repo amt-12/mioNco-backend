@@ -13,6 +13,7 @@ const {
     addOrderItem,
     getOnRequestAuditLogs,
     getPopularItemsByFloor,
+    getKitchenKots,
     printKotDirectly
 } = require('../controllers/orderController');
 const { protect } = require('../middlewares/authMiddleware');
@@ -29,6 +30,7 @@ router.post('/public/checkout', checkoutOrder);
 
 router.use(protect);
 
+router.get('/kots', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Kitchen Staff', 'Waiter', 'Receptionist'), getKitchenKots);
 router.get('/popular-by-floor', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Kitchen Staff'), getPopularItemsByFloor);
 router.get('/on-request-audit', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getOnRequestAuditLogs);
 

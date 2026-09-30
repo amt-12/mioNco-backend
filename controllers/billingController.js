@@ -2270,7 +2270,24 @@ exports.getDailySalesReport = async (req, res) => {
 
     let isCurrentDay = false;
 
-    if (date) {
+    if (startDate && endDate) {
+      const sParts = String(startDate).split('-');
+      const eParts = String(endDate).split('-');
+      if (sParts.length === 3 && eParts.length === 3) {
+        const [sY, sM, sD] = sParts.map(Number);
+        const [eY, eM, eD] = eParts.map(Number);
+        start = new Date(Date.UTC(sY, sM - 1, sD, 0, 0, 0, 0) + tzOffsetMs);
+        end = new Date(Date.UTC(eY, eM - 1, eD, 23, 59, 59, 999) + tzOffsetMs);
+      } else {
+        start = new Date(startDate);
+        start.setHours(0, 0, 0, 0);
+        end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+      }
+      if (endDate === todayDateStr || (now >= start && now <= end)) {
+        isCurrentDay = true;
+      }
+    } else if (date) {
       if (date === todayDateStr) {
         isCurrentDay = true;
       }
@@ -2287,75 +2304,21 @@ exports.getDailySalesReport = async (req, res) => {
         end = new Date(date);
         end.setHours(23, 59, 59, 999);
       }
-    } else if (startDate && endDate) {
-      start = new Date(startDate);
-      end = new Date(endDate);
     } else {
       isCurrentDay = true;
       start = new Date(Date.UTC(todayY, todayM - 1, todayD, 0, 0, 0, 0) + tzOffsetMs);
       end = new Date(Date.UTC(todayY, todayM - 1, todayD, 23, 59, 59, 999) + tzOffsetMs);
     }
 
-    // Expand start to active business day shift if open and user is auditing today's business
-    try {
-      const BusinessDay = require('../models/BusinessDay');
-      const activeDay = await BusinessDay.findOne({ status: 'Open' });
-      if (activeDay && activeDay.startTime) {
-        const shiftStart = new Date(activeDay.startTime);
-        if (isCurrentDay || shiftStart < start) {
-          if (shiftStart < start) {
-            start = shiftStart;
-          }
-          if (now > end) {
-            end = new Date(now.getTime() + 60 * 1000);
-          }
-        }
-      }
-    } catch (bErr) {}
-
-    // Fallback: If querying today/recent and 0 orders found in strict window, expand to include last 24 hours
-    if (isCurrentDay) {
-      const testOrdersCount = await Order.countDocuments({
-        $or: [
-          { createdAt: { $gte: start, $lte: end } },
-          { updatedAt: { $gte: start, $lte: end } }
-        ]
-      });
-      const testBillsCount = await Bill.countDocuments({
-        $or: [
-          { createdAt: { $gte: start, $lte: end } },
-          { updatedAt: { $gte: start, $lte: end } }
-        ]
-      });
-
-      if (testOrdersCount === 0 && testBillsCount === 0) {
-        const recentOrders = await Order.find({
-          createdAt: { $gte: new Date(Date.now() - 24 * 3600 * 1000) }
-        }).sort({ createdAt: 1 }).limit(1);
-
-        if (recentOrders.length > 0) {
-          const earliest = new Date(recentOrders[0].createdAt);
-          if (earliest < start) {
-            start = earliest;
-          }
-          end = new Date(Date.now() + 3600 * 1000);
-        }
-      }
-    }
-
     const dateFilter = {
-      $or: [
-        { createdAt: { $gte: start, $lte: end } },
-        { updatedAt: { $gte: start, $lte: end } }
-      ]
+      createdAt: { $gte: start, $lte: end }
     };
 
     // Fetch All Orders placed for the day (Running Sales of the Day)
     const orders = await Order.find({
       $or: [
         { createdAt: { $gte: start, $lte: end } },
-        { 'paymentDetails.paidAt': { $gte: start, $lte: end } },
-        { updatedAt: { $gte: start, $lte: end } }
+        { 'paymentDetails.paidAt': { $gte: start, $lte: end } }
       ]
     })
       .populate('table')
@@ -2365,11 +2328,11 @@ exports.getDailySalesReport = async (req, res) => {
     const orderIds = orders.map(o => o._id);
     const orderBillIds = orders.filter(o => o.bill).map(o => o.bill);
 
-    // Fetch All Bills for the day (including bills matching date or referencing today's orders)
+    // Fetch All Bills for the day (strictly matching date window or referencing today's orders)
     const bills = await Bill.find({
       $or: [
         { createdAt: { $gte: start, $lte: end } },
-        { updatedAt: { $gte: start, $lte: end } },
+        { 'payments.paidAt': { $gte: start, $lte: end } },
         { orders: { $in: orderIds } },
         { _id: { $in: orderBillIds } }
       ]
@@ -2379,21 +2342,11 @@ exports.getDailySalesReport = async (req, res) => {
       .populate('ncEmployee', 'name role')
       .sort({ createdAt: -1 });
 
-    // Fetch Spoilage Records
+    // Fetch Spoilage Records strictly within the day's date window
     let spoilages = await FoodSpoilage.find(dateFilter).sort({ createdAt: -1 });
-    if (spoilages.length === 0 && isCurrentDay) {
-      spoilages = await FoodSpoilage.find({
-        createdAt: { $gte: new Date(Date.now() - 24 * 3600 * 1000) }
-      }).sort({ createdAt: -1 });
-    }
 
-    // Fetch Audit Logs for edits, voids, cancellations, discounts, SC removal
-    const auditLogs = await AuditLog.find({
-      $or: [
-        { createdAt: { $gte: start, $lte: end } },
-        { updatedAt: { $gte: start, $lte: end } }
-      ]
-    })
+    // Fetch Audit Logs for edits, voids, cancellations, discounts, SC removal strictly within the day's date window
+    const auditLogs = await AuditLog.find(dateFilter)
       .populate('employeeId', 'name role')
       .sort({ createdAt: -1 });
 
@@ -2820,6 +2773,27 @@ exports.getDailySalesReport = async (req, res) => {
       }
     });
 
+    const billsList = bills
+      .filter(b => b.status !== 'Merged' && b.paymentStatus !== 'Merged')
+      .map(b => ({
+        _id: b._id,
+        billNumber: b.billNumber,
+        tableName: b.table?.tableNumber ? `Table ${b.table.tableNumber}` : (b.table?.name || 'Takeaway/Walk-in'),
+        subtotal: b.subtotal || 0,
+        discount: Number((b.billDiscountAmount || 0) + (b.itemLevelDiscounts || 0)),
+        tax: b.totalTaxAmount || 0,
+        serviceCharge: b.serviceChargeAmount || 0,
+        finalAmount: b.finalAmount || 0,
+        amountPaid: b.amountPaid || 0,
+        paymentStatus: b.paymentStatus || 'Pending',
+        status: b.status || 'Active',
+        paymentModes: (b.payments && b.payments.length > 0)
+          ? b.payments.map(p => `${p.mode || 'Cash'}: ₹${Number(p.amount || 0).toFixed(2)}`).join(', ')
+          : (b.paymentMethod || 'Unpaid'),
+        staff: b.createdBy?.name || b.ncEmployee?.name || 'Staff',
+        timestamp: b.createdAt
+      }));
+
     return res.status(200).json({
       success: true,
       data: {
@@ -2846,6 +2820,7 @@ exports.getDailySalesReport = async (req, res) => {
           cancelledBillsCount
         },
         reports: {
+          billsList,
           runningOrdersList,
           discountReport,
           ncReport,

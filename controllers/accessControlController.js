@@ -68,6 +68,7 @@ const SYSTEM_MODULES = [
       { id: 'waiter_pos', name: 'Waiter POS', key: '/orders/pos' },
       { id: 'waiter_punches', name: 'Waiter Punch Stats', key: '/orders/waiter-punches' },
       { id: 'all_orders', name: 'All Orders', key: '/orders/list' },
+      { id: 'kitchen_kots', name: 'Kitchen KOTs', key: '/orders/kots' },
       { id: 'popular_by_floor', name: 'Most Ordered by Floor', key: '/orders/popular-by-floor' }
     ]
   },
