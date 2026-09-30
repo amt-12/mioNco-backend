@@ -2788,8 +2788,8 @@ exports.getDailySalesReport = async (req, res) => {
         paymentStatus: b.paymentStatus || 'Pending',
         status: b.status || 'Active',
         paymentModes: (b.payments && b.payments.length > 0)
-          ? b.payments.map(p => `${p.mode || 'Cash'}: ₹${Number(p.amount || 0).toFixed(2)}`).join(', ')
-          : (b.paymentMethod || 'Unpaid'),
+          ? [...new Set(b.payments.map(p => p.mode || 'Cash'))].join(', ')
+          : (b.paymentStatus === 'Non-Chargeable' || b.isNonChargeableBill ? 'Non-Chargeable' : (b.paymentMethod || 'Unpaid')),
         staff: b.createdBy?.name || b.ncEmployee?.name || 'Staff',
         timestamp: b.createdAt
       }));
