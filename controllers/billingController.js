@@ -1420,6 +1420,11 @@ exports.applyDiscount = async (req, res) => {
       sBill.billDiscountValue = bDiscountVal;
       sBill.billDiscountAmount = calculated.billDiscountAmount;
       sBill.billDiscountReason = discountReason || '';
+      if (req.body.discountGivenBy) {
+        sBill.discountGivenBy = req.body.discountGivenBy;
+      } else if (req.user?.name) {
+        sBill.discountGivenBy = req.user.name;
+      }
 
       sBill.cgstAmount = calculated.cgstAmount;
       sBill.sgstAmount = calculated.sgstAmount;
@@ -1434,10 +1439,23 @@ exports.applyDiscount = async (req, res) => {
       }
     }
 
-    let responseData = bill;
+    const freshBill = await Bill.findById(bill._id).populate('table').populate('orders');
+    let responseData = freshBill || bill;
     if (siblingBills.length > 1) {
       responseData = siblingBills;
     }
+
+    const io = req.app.get('io') || req.app.get('socketio');
+    if (io) {
+      io.emit('bill_updated', {
+        billId: bill._id,
+        table: bill.table,
+        billDiscountAmount: responseData.billDiscountAmount,
+        finalAmount: responseData.finalAmount
+      });
+      io.emit('order_status_updated', { table: bill.table });
+    }
+
     return res.json({ success: true, message: 'Discount applied', data: responseData });
   } catch (error) {
     console.error('Error applying discount:', error);
