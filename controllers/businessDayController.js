@@ -95,7 +95,9 @@ const calculateShiftMetrics = (orders, bills, spoilages, openingFloat = 0) => {
       b.payments.forEach(p => {
         const amt = Number(p.amount) || 0;
         const mode = (p.mode || '').toLowerCase();
-        if (mode.includes('upi')) upiSales += amt;
+        if (mode === 'hold' || mode.includes('hold')) {
+          // Hold bills are deferred receivables, not collected cash
+        } else if (mode.includes('upi')) upiSales += amt;
         else if (mode.includes('card')) cardSales += amt;
         else if (mode.includes('cash')) cashSales += amt;
         else if (mode.includes('online') || mode.includes('air') || mode.includes('qr')) onlineSales += amt;
@@ -105,16 +107,18 @@ const calculateShiftMetrics = (orders, bills, spoilages, openingFloat = 0) => {
     } else {
       // If no payments array but marked paid or settled
       const method = (b.paymentMethod || '').toLowerCase();
-      const paidAmt = b.amountPaid || bAmount;
+      const paidAmt = b.amountPaid || (b.paymentStatus === 'Hold' ? 0 : bAmount);
       if (b.isNonChargeableBill || b.isComplimentaryBill || b.paymentStatus === 'Non-Chargeable') {
         complimentarySales += paidAmt;
+      } else if (b.paymentStatus === 'Hold') {
+        // Hold bills are deferred receivables, not collected cash
       } else if (method.includes('upi')) {
         upiSales += paidAmt;
       } else if (method.includes('card')) {
         cardSales += paidAmt;
       } else if (method.includes('online') || method.includes('air') || method.includes('qr')) {
         onlineSales += paidAmt;
-      } else if (b.paymentStatus === 'Paid' || b.status === 'Settled') {
+      } else if ((b.paymentStatus === 'Paid' || b.status === 'Settled') && b.paymentStatus !== 'Hold') {
         cashSales += paidAmt;
       }
     }

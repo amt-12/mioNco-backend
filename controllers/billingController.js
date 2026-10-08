@@ -1514,7 +1514,7 @@ exports.mergeBills = async (req, res) => {
 // @access  Private
 exports.applyDiscount = async (req, res) => {
   try {
-    const { discountType, discountValue, discountReason } = req.body;
+    const { discountType, discountValue, discountReason, discountGivenBy } = req.body;
     let bill = await Bill.findById(req.params.id);
 
     if (!bill) {
@@ -1523,6 +1523,10 @@ exports.applyDiscount = async (req, res) => {
 
     if (!bill) {
       return res.status(404).json({ success: false, message: 'Bill or order not found' });
+    }
+
+    if (discountType !== 'None' && Number(discountValue || 0) > 0 && !discountGivenBy) {
+      return res.status(400).json({ success: false, message: 'Please select who authorized this discount (Given By is required)' });
     }
 
     // Handle split bills: apply discount across all sibling split bills for the table/parent bill
@@ -1557,11 +1561,7 @@ exports.applyDiscount = async (req, res) => {
       sBill.billDiscountValue = bDiscountVal;
       sBill.billDiscountAmount = calculated.billDiscountAmount;
       sBill.billDiscountReason = discountReason || '';
-      if (req.body.discountGivenBy) {
-        sBill.discountGivenBy = req.body.discountGivenBy;
-      } else if (req.user?.name) {
-        sBill.discountGivenBy = req.user.name;
-      }
+      sBill.discountGivenBy = (discountType !== 'None' && bDiscountVal > 0) ? (discountGivenBy || '') : '';
 
       sBill.cgstAmount = calculated.cgstAmount;
       sBill.sgstAmount = calculated.sgstAmount;
@@ -2252,6 +2252,7 @@ exports.recordPayment = async (req, res) => {
     bill.balanceDue = Math.max(0, bill.finalAmount - bill.amountPaid);
 
     const isNcPayment = (payments && payments.some(p => p.mode === 'NC')) || billData?.isNonChargeableBill;
+    const isHoldPayment = (payments && payments.some(p => p.mode === 'Hold')) || billData?.isHold || req.body?.isHold || req.body?.paymentMode === 'Hold';
 
     if (isNcPayment) {
       bill.isNonChargeableBill = true;
@@ -2276,6 +2277,16 @@ exports.recordPayment = async (req, res) => {
           it.totalPrice = 0;
         });
       }
+    } else if (isHoldPayment) {
+      bill.paymentStatus = 'Hold';
+      bill.status = 'Settled';
+      bill.amountPaid = 0;
+      bill.balanceDue = bill.finalAmount;
+      bill.holdGuestName = billData?.holdGuestName || req.body.holdGuestName || '';
+      bill.holdGuestPhone = billData?.holdGuestPhone || req.body.holdGuestPhone || '';
+      bill.holdNotes = billData?.holdNotes || req.body.holdNotes || '';
+      bill.holdAuthorizedBy = billData?.holdAuthorizedBy || req.body.holdAuthorizedBy || req.user?.name || '';
+      bill.holdDate = new Date();
     } else if (bill.paymentStatus !== 'Non-Chargeable') {
       if (bill.balanceDue === 0 || bill.amountPaid >= bill.finalAmount) {
         bill.paymentStatus = 'Paid';
@@ -2287,18 +2298,18 @@ exports.recordPayment = async (req, res) => {
 
     await bill.save();
 
-    if (bill.paymentStatus === 'Paid' || bill.paymentStatus === 'Non-Chargeable') {
+    if (bill.paymentStatus === 'Paid' || bill.paymentStatus === 'Non-Chargeable' || bill.paymentStatus === 'Hold') {
       const io = req.app.get('io') || req.app.get('socketio');
 
-      // Update all associated Order documents to Paid & Completed
+      // Update all associated Order documents to Paid (or Hold) & Completed
       if (bill.orders && bill.orders.length > 0) {
         await Order.updateMany(
           { _id: { $in: bill.orders } },
-          { paymentStatus: 'Paid', status: 'Completed' }
+          { paymentStatus: bill.paymentStatus === 'Hold' ? 'Hold' : 'Paid', status: 'Completed' }
         );
         if (io) {
           bill.orders.forEach(oId => {
-            io.emit('order_status_updated', { _id: oId, paymentStatus: 'Paid', status: 'Completed', table: bill.table });
+            io.emit('order_status_updated', { _id: oId, paymentStatus: bill.paymentStatus === 'Hold' ? 'Hold' : 'Paid', status: 'Completed', table: bill.table });
           });
         }
       }
@@ -2319,7 +2330,7 @@ exports.recordPayment = async (req, res) => {
           table: tId,
           _id: { $ne: bill._id },
           status: 'Active',
-          paymentStatus: { $nin: ['Paid', 'Non-Chargeable'] }
+          paymentStatus: { $nin: ['Paid', 'Non-Chargeable', 'Hold'] }
         });
 
         if (remainingUnpaid === 0) {
@@ -2344,7 +2355,7 @@ exports.recordPayment = async (req, res) => {
       if (bill.session) {
         const sessionDoc = await DiningSession.findById(bill.session);
         if (sessionDoc) {
-          sessionDoc.paymentStatus = 'Paid';
+          sessionDoc.paymentStatus = bill.paymentStatus === 'Hold' ? 'Hold' : 'Paid';
           sessionDoc.status = 'Completed';
           sessionDoc.endTime = new Date();
           await sessionDoc.save();
@@ -2354,11 +2365,69 @@ exports.recordPayment = async (req, res) => {
 
     return res.json({
       success: true,
-      message: bill.paymentStatus === 'Paid' ? 'Bill settled successfully' : 'Partial payment recorded',
+      message: bill.paymentStatus === 'Hold'
+        ? 'Bill placed on Hold successfully. Table is now available.'
+        : (bill.paymentStatus === 'Paid' ? 'Bill settled successfully' : 'Partial payment recorded'),
       data: bill
     });
   } catch (error) {
     console.error('Error recording payment:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Settle a bill that was previously placed on Hold
+// @route   POST /api/v1/billing/:id/settle-hold
+// @access  Private
+exports.settleHoldBill = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { paymentMode = 'Cash', txnId, cardType, notes } = req.body;
+
+    const bill = await Bill.findById(id).populate('table').populate('orders');
+    if (!bill) {
+      return res.status(404).json({ success: false, message: 'Bill not found' });
+    }
+
+    const payAmount = bill.balanceDue > 0 ? bill.balanceDue : bill.finalAmount;
+
+    bill.payments.push({
+      mode: paymentMode || 'Cash',
+      amount: payAmount,
+      txnId: txnId || '',
+      cardType: cardType || '',
+      timestamp: new Date()
+    });
+
+    bill.amountPaid = (bill.amountPaid || 0) + payAmount;
+    bill.balanceDue = 0;
+    bill.paymentStatus = 'Paid';
+    bill.status = 'Settled';
+    if (notes) {
+      bill.holdNotes = (bill.holdNotes ? bill.holdNotes + ' | ' : '') + `Paid on ${new Date().toLocaleDateString()}: ${notes}`;
+    }
+
+    await bill.save();
+
+    if (bill.orders && bill.orders.length > 0) {
+      await Order.updateMany(
+        { _id: { $in: bill.orders } },
+        { paymentStatus: 'Paid' }
+      );
+    }
+
+    const io = req.app.get('io') || req.app.get('socketio');
+    if (io) {
+      io.emit('bill_status_updated', { _id: bill._id, paymentStatus: 'Paid' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Bill #${bill.billNumber} hold payment of ₹${payAmount} received via ${paymentMode}!`,
+      data: bill
+    });
+  } catch (error) {
+    console.error('Error settling hold bill:', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -2692,14 +2761,16 @@ exports.getDailySalesReport = async (req, res) => {
       // Valid Active / Paid / Settled Bill
       grossSales += (bill.subtotal || 0);
       totalTaxes += (bill.totalTaxAmount || 0);
-      const settledAmt = bill.amountPaid || bill.finalAmount || 0;
+      const isHold = bill.paymentStatus === 'Hold';
+      const settledAmt = isHold ? 0 : (bill.amountPaid || bill.finalAmount || 0);
       netCollection += settledAmt;
 
-      const isPaidBill = bill.paymentStatus === 'Paid' || settledAmt > 0;
+      const isPaidBill = !isHold && (bill.paymentStatus === 'Paid' || settledAmt > 0);
       if (isPaidBill && bill.paymentStatus !== 'Non-Chargeable' && !bill.isNonChargeableBill) {
         if (bill.payments && bill.payments.length > 0) {
           bill.payments.forEach(p => {
             const mode = p.mode || 'Cash';
+            if (mode === 'Hold') return;
             const amt = Number(p.amount) || 0;
             if (!paymentMethodsMap[mode]) paymentMethodsMap[mode] = { mode, totalAmount: 0, count: 0 };
             paymentMethodsMap[mode].totalAmount += amt;
@@ -2965,14 +3036,47 @@ exports.getDailySalesReport = async (req, res) => {
         serviceCharge: b.serviceChargeAmount || 0,
         finalAmount: b.finalAmount || 0,
         amountPaid: b.amountPaid || 0,
+        balanceDue: b.paymentStatus === 'Hold' ? (b.balanceDue || b.finalAmount) : (b.balanceDue || 0),
         paymentStatus: b.paymentStatus || 'Pending',
         status: b.status || 'Active',
-        paymentModes: (b.payments && b.payments.length > 0)
-          ? [...new Set(b.payments.map(p => p.mode || 'Cash'))].join(', ')
-          : (b.paymentStatus === 'Non-Chargeable' || b.isNonChargeableBill ? 'Non-Chargeable' : (b.paymentMethod || 'Unpaid')),
+        paymentModes: b.paymentStatus === 'Hold'
+          ? 'Hold (Pay Later)'
+          : ((b.payments && b.payments.length > 0)
+            ? [...new Set(b.payments.map(p => p.mode || 'Cash'))].join(', ')
+            : (b.paymentStatus === 'Non-Chargeable' || b.isNonChargeableBill ? 'Non-Chargeable' : (b.paymentMethod || 'Unpaid'))),
+        holdGuestName: b.holdGuestName || '',
+        holdGuestPhone: b.holdGuestPhone || '',
+        holdNotes: b.holdNotes || '',
+        holdAuthorizedBy: b.holdAuthorizedBy || '',
+        holdDate: b.holdDate || null,
         staff: b.createdBy?.name || b.ncEmployee?.name || 'Staff',
         timestamp: b.createdAt
       }));
+
+    // Fetch all currently pending Hold bills (from any date) where payment has not been collected yet
+    const allPendingHoldBills = await Bill.find({
+      paymentStatus: 'Hold',
+      status: { $ne: 'Cancelled' }
+    })
+      .populate('table')
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 });
+
+    const pendingHoldList = allPendingHoldBills.map(b => ({
+      _id: b._id,
+      billNumber: b.billNumber,
+      tableName: b.table?.tableNumber ? `Table ${b.table.tableNumber}` : (b.table?.name || 'Dine-In'),
+      subtotal: b.subtotal || 0,
+      finalAmount: b.finalAmount || 0,
+      amountPaid: b.amountPaid || 0,
+      balanceDue: b.balanceDue > 0 ? b.balanceDue : b.finalAmount,
+      holdGuestName: b.holdGuestName || '',
+      holdGuestPhone: b.holdGuestPhone || '',
+      holdNotes: b.holdNotes || '',
+      holdAuthorizedBy: b.holdAuthorizedBy || b.createdBy?.name || 'Staff',
+      holdDate: b.holdDate || b.createdAt,
+      timestamp: b.createdAt
+    }));
 
     return res.status(200).json({
       success: true,
@@ -2998,6 +3102,8 @@ exports.getDailySalesReport = async (req, res) => {
           totalBillsCount,
           voidedBillsCount,
           cancelledBillsCount,
+          pendingHoldCount: pendingHoldList.length,
+          pendingHoldTotal: pendingHoldList.reduce((sum, h) => sum + (h.balanceDue || h.finalAmount || 0), 0),
           paymentMethodsBreakdown: Object.values(paymentMethodsMap).map(pm => ({
             mode: pm.mode,
             totalAmount: Number(pm.totalAmount.toFixed(2)),
@@ -3006,6 +3112,7 @@ exports.getDailySalesReport = async (req, res) => {
         },
         reports: {
           billsList,
+          pendingHoldList,
           runningOrdersList,
           discountReport,
           ncReport,

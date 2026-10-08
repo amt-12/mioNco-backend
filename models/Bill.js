@@ -122,11 +122,11 @@ const billSchema = new mongoose.Schema({
   
   paymentStatus: {
     type: String,
-    enum: ['Pending', 'Partially Paid', 'Paid', 'Refunded', 'Voided', 'Cancelled', 'Non-Chargeable'],
+    enum: ['Pending', 'Partially Paid', 'Paid', 'Refunded', 'Voided', 'Cancelled', 'Non-Chargeable', 'Hold'],
     default: 'Pending'
   },
   payments: [{
-    mode: { type: String, enum: ['Cash', 'Card', 'UPI', 'NC', 'Non-Chargeable', 'Other'], default: 'Cash' },
+    mode: { type: String, enum: ['Cash', 'Card', 'UPI', 'NC', 'Non-Chargeable', 'Other', 'Hold'], default: 'Cash' },
     amount: { type: Number, required: true },
     txnId: String,
     cardType: String,
@@ -135,6 +135,12 @@ const billSchema = new mongoose.Schema({
   }],
   amountPaid: { type: Number, default: 0 },
   balanceDue: { type: Number, default: 0 },
+  
+  holdGuestName: { type: String, default: '' },
+  holdGuestPhone: { type: String, default: '' },
+  holdNotes: { type: String, default: '' },
+  holdAuthorizedBy: { type: String, default: '' },
+  holdDate: { type: Date },
   
   reprintCount: { type: Number, default: 0 },
   reprintLogs: [{

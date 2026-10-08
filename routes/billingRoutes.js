@@ -14,6 +14,7 @@ const {
   voidBill,
   reprintBill,
   recordPayment,
+  settleHoldBill,
   getBillingAnalytics,
   getDailySalesReport,
   deleteBill,
@@ -47,5 +48,6 @@ router.post('/:id/void', authorize('Super Admin', 'super_admin', 'admin', 'Resta
 router.delete('/:id', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager'), deleteBill);
 router.post('/:id/reprint', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), reprintBill);
 router.post('/:id/payment', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), recordPayment);
+router.post('/:id/settle-hold', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), settleHoldBill);
 
 module.exports = router;
