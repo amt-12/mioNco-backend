@@ -16,7 +16,8 @@ const {
   recordPayment,
   getBillingAnalytics,
   getDailySalesReport,
-  deleteBill
+  deleteBill,
+  syncBill
 } = require('../controllers/billingController');
 const { protect } = require('../middlewares/authMiddleware');
 const { authorize } = require('../middlewares/rbacMiddleware');
@@ -30,6 +31,7 @@ router.post('/generate', authorize('Super Admin', 'super_admin', 'admin', 'Resta
 router.get('/', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), getBills);
 router.get('/analytics/summary', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getBillingAnalytics);
 router.get('/:id', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), getBillById);
+router.post('/:id/sync', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), syncBill);
 
 router.post('/:id/split', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), splitBill);
 router.post('/merge', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), mergeBills);

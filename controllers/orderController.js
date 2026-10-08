@@ -329,6 +329,20 @@ exports.createOrder = async (req, res) => {
             existingOrder.status = 'Pending Acceptance';
 
             order = await existingOrder.save();
+            try {
+                const Bill = require('../models/Bill');
+                const activeBill = await Bill.findOne({ 
+                    $or: [{ orders: existingOrder._id }, { table: validTableId }], 
+                    status: 'Active', 
+                    'splitInfo.isSplit': { $ne: true } 
+                });
+                if (activeBill) {
+                    const { syncBillWithOrders } = require('./billingController');
+                    await syncBillWithOrders(activeBill._id);
+                }
+            } catch (syncErr) {
+                console.error('Error auto-syncing bill on items append:', syncErr);
+            }
         } else {
             const tax = Number(addedTax.toFixed(2));
             const total = Math.round(addedSubtotal + tax);
@@ -688,6 +702,16 @@ exports.updateOrderItemStatus = async (req, res) => {
         }
 
         await order.save();
+        try {
+            const Bill = require('../models/Bill');
+            const activeBill = await Bill.findOne({ orders: order._id, status: 'Active', 'splitInfo.isSplit': { $ne: true } });
+            if (activeBill) {
+                const { syncBillWithOrders } = require('./billingController');
+                await syncBillWithOrders(activeBill._id);
+            }
+        } catch (syncErr) {
+            console.error('Error auto-syncing bill on item status update:', syncErr);
+        }
 
         const populatedOrder = await Order.findById(order._id)
             .populate('table')
@@ -1061,6 +1085,16 @@ exports.removeOrderItem = async (req, res) => {
         }
 
         await order.save();
+        try {
+            const Bill = require('../models/Bill');
+            const activeBill = await Bill.findOne({ orders: order._id, status: 'Active', 'splitInfo.isSplit': { $ne: true } });
+            if (activeBill) {
+                const { syncBillWithOrders } = require('./billingController');
+                await syncBillWithOrders(activeBill._id);
+            }
+        } catch (syncErr) {
+            console.error('Error auto-syncing bill on item remove:', syncErr);
+        }
 
         const populatedOrder = await Order.findById(order._id)
             .populate('table')
@@ -1122,6 +1156,16 @@ exports.addOrderItem = async (req, res) => {
         order.total = Math.max(0, order.subTotal + (order.tax || 0) + (order.serviceCharge || 0) - (order.discount || 0));
 
         await order.save();
+        try {
+            const Bill = require('../models/Bill');
+            const activeBill = await Bill.findOne({ orders: order._id, status: 'Active', 'splitInfo.isSplit': { $ne: true } });
+            if (activeBill) {
+                const { syncBillWithOrders } = require('./billingController');
+                await syncBillWithOrders(activeBill._id);
+            }
+        } catch (syncErr) {
+            console.error('Error auto-syncing bill on add item:', syncErr);
+        }
 
         const populatedOrder = await Order.findById(order._id)
             .populate('table')

@@ -304,6 +304,112 @@ const calculateBillTotals = async (rawItems, options = {}) => {
   };
 };
 
+// Helper to synchronize an active, non-split bill with its order(s)
+const syncBillWithOrders = async (billIdOrDoc) => {
+  try {
+    const billId = billIdOrDoc?._id || billIdOrDoc;
+    if (!billId) return billIdOrDoc;
+
+    let billDoc = await Bill.findById(billId);
+    if (!billDoc || billDoc.status !== 'Active' || billDoc.paymentStatus === 'Paid' || billDoc.splitInfo?.isSplit) {
+      return billDoc || billIdOrDoc;
+    }
+
+    // Gather all active orders for this bill
+    let orderIds = (billDoc.orders || []).map(o => o._id || o).filter(Boolean);
+    if (billDoc.table) {
+      const tableOrders = await Order.find({
+        table: billDoc.table,
+        status: { $nin: ['Completed', 'Cancelled', 'Void', 'Voided'] }
+      }).select('_id');
+      const tableOrderIds = tableOrders.map(to => to._id);
+      const combined = [...new Set([...orderIds.map(String), ...tableOrderIds.map(String)])];
+      if (combined.length > orderIds.length) {
+        billDoc.orders = combined;
+        orderIds = combined;
+      }
+    }
+
+    if (orderIds.length === 0) return billDoc;
+
+    const orders = await Order.find({
+      _id: { $in: orderIds },
+      status: { $nin: ['Cancelled', 'Void', 'Voided'] }
+    }).populate('items.menuItem');
+
+    if (orders.length === 0) return billDoc;
+
+    // Consolidate non-cancelled, non-spoiled items from orders
+    const rawItems = [];
+    orders.forEach(ord => {
+      (ord.items || []).forEach(item => {
+        if (item.status !== 'Cancelled' && item.status !== 'Void' && item.status !== 'Voided' && !item.isSpoiled) {
+          const isSpoiled = Boolean(item.isSpoiled);
+          const existingBillItem = (billDoc.items || []).find(bi => 
+            (bi.menuItem && item.menuItem && String(bi.menuItem) === String(item.menuItem?._id || item.menuItem)) ||
+            (bi.foodName && item.foodName && bi.foodName.trim().toLowerCase() === item.foodName.trim().toLowerCase())
+          );
+
+          rawItems.push({
+            menuItem: item.menuItem?._id || item.menuItem,
+            foodName: item.foodName || item.menuItem?.foodName || 'Item',
+            variantName: item.variant?.name || item.variantName || existingBillItem?.variantName,
+            unitPrice: item.unitPrice ?? (item.totalPrice / (item.quantity || 1)) ?? 0,
+            quantity: item.quantity || 1,
+            totalPrice: isSpoiled ? 0 : item.totalPrice,
+            isOnRequest: item.isOnRequest || false,
+            isSpoiled,
+            spoilageRemarks: item.spoilageRemarks || '',
+            spoilageMarkedBy: item.spoilageMarkedBy || '',
+            itemType: item.itemType || existingBillItem?.itemType || 'Food',
+            taxType: item.taxType || existingBillItem?.taxType,
+            taxRate: item.taxRate ?? existingBillItem?.taxRate,
+            addedBy: item.addedBy || existingBillItem?.addedBy,
+            reason: item.reason || existingBillItem?.reason,
+            isComplimentary: existingBillItem?.isComplimentary || false,
+            complimentaryReason: existingBillItem?.complimentaryReason || '',
+            isNonChargeable: existingBillItem?.isNonChargeable || false,
+            ncRemark: existingBillItem?.ncRemark || '',
+            staffEmployeeId: existingBillItem?.staffEmployeeId || ''
+          });
+        }
+      });
+    });
+
+    const calculated = await calculateBillTotals(rawItems, {
+      taxesEnabled: billDoc.taxesEnabled !== false,
+      serviceChargeEnabled: billDoc.serviceChargeEnabled !== false,
+      customServiceChargeRate: billDoc.serviceChargeRate,
+      discountType: billDoc.billDiscountType || 'None',
+      discountValue: billDoc.billDiscountValue || 0,
+      isComplimentaryBill: billDoc.isComplimentaryBill || false,
+      isNonChargeableBill: billDoc.isNonChargeableBill || false
+    });
+
+    billDoc.items = calculated.items;
+    billDoc.subtotal = calculated.subtotal;
+    billDoc.billDiscountAmount = calculated.billDiscountAmount;
+    billDoc.cgstAmount = calculated.cgstAmount;
+    billDoc.sgstAmount = calculated.sgstAmount;
+    billDoc.vatAmount = calculated.vatAmount;
+    billDoc.totalTaxAmount = calculated.totalTaxAmount;
+    billDoc.serviceChargeAmount = calculated.serviceChargeAmount;
+    billDoc.finalAmount = calculated.finalAmount;
+    billDoc.balanceDue = Math.max(0, calculated.finalAmount - (billDoc.amountPaid || 0));
+
+    await billDoc.save();
+
+    return await Bill.findById(billDoc._id)
+      .populate('table')
+      .populate('session')
+      .populate('orders')
+      .populate('createdBy', 'name role');
+  } catch (err) {
+    console.error('Error in syncBillWithOrders:', err);
+    return billIdOrDoc;
+  }
+};
+
 // Helper to resolve an existing Bill or construct an in-memory Bill from an Order
 const resolveBillObject = async (idParam) => {
   if (!idParam) return null;
@@ -334,6 +440,11 @@ const resolveBillObject = async (idParam) => {
   }
 
   if (b) {
+    // Auto-sync active non-split bill with order items
+    if (b.status === 'Active' && b.paymentStatus !== 'Paid' && !b.splitInfo?.isSplit) {
+      b = await syncBillWithOrders(b._id);
+    }
+
     // If existing bill has a generic BILL- prefix but floor is Bistro or known floor, auto-correct it
     if (b.billNumber && b.billNumber.startsWith('BILL-')) {
       const expectedPrefix = await resolveFloorPrefix(b.table);
@@ -522,7 +633,12 @@ exports.generateBill = async (req, res) => {
         .sort({ createdAt: -1 });
 
       if (existingBills.length > 0) {
-        const firstBill = existingBills[0];
+        let firstBill = existingBills[0];
+        // Auto-sync active non-split bill with latest order items
+        if (!firstBill.splitInfo?.isSplit) {
+          firstBill = await syncBillWithOrders(firstBill._id);
+        }
+
         // If existing active bill has a generic BILL- prefix but floor is Bistro or known floor, auto-correct it
         if (firstBill.billNumber && firstBill.billNumber.startsWith('BILL-')) {
           const expectedPrefix = await resolveFloorPrefix(floorId || floor || req.body.floorName || firstBill.table || tableId);
@@ -724,6 +840,22 @@ exports.getBills = async (req, res) => {
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(Number(limit));
+
+    // Auto-sync any active non-split bills whose items might be out of date with their orders
+    if (query.status === 'Active' || query.status === undefined) {
+      for (let i = 0; i < bills.length; i++) {
+        const b = bills[i];
+        if (b && b.status === 'Active' && !b.splitInfo?.isSplit && b.paymentStatus !== 'Paid' && b.orders && b.orders.length > 0) {
+          const totalActiveOrderItems = b.orders.reduce((acc, ord) => {
+            return acc + (ord.items || []).filter(item => item.status !== 'Cancelled' && item.status !== 'Void' && item.status !== 'Voided' && !item.isSpoiled).length;
+          }, 0);
+          if (totalActiveOrderItems !== (b.items?.length || 0)) {
+            const synced = await syncBillWithOrders(b._id);
+            if (synced) bills[i] = synced;
+          }
+        }
+      }
+    }
 
     const total = await Bill.countDocuments(query);
 
@@ -2884,3 +3016,21 @@ exports.getDailySalesReport = async (req, res) => {
     return res.status(500).json({ success: false, message: error.message });
   }
 };
+
+// @desc    Sync active bill with latest order items
+// @route   POST /api/v1/billing/:id/sync
+// @access  Private
+exports.syncBill = async (req, res) => {
+  try {
+    const updated = await syncBillWithOrders(req.params.id);
+    if (!updated) {
+      return res.status(404).json({ success: false, message: 'Bill not found' });
+    }
+    return res.status(200).json({ success: true, data: updated, message: 'Bill synchronized with order items' });
+  } catch (err) {
+    console.error('Sync Bill error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.syncBillWithOrders = syncBillWithOrders;
