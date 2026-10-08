@@ -264,7 +264,9 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     }
   }
 
-  const postDiscountSubtotal = Math.max(0, subtotal - billDiscountAmount);
+  const roundedSubtotal = Math.round(subtotal);
+  const roundedDiscount = Math.round(billDiscountAmount);
+  const postDiscountSubtotal = Math.max(0, roundedSubtotal - roundedDiscount);
 
   // Recalculate tax if post discount subtotal changed proportionally
   let finalCgst = cgstAmount;
@@ -278,29 +280,32 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     finalVat = vatAmount * ratio;
   }
 
-  const totalTaxAmount = taxesEnabled ? (finalCgst + finalSgst + finalVat) : 0;
+  const roundedCgst = taxesEnabled ? Math.round(finalCgst) : 0;
+  const roundedSgst = taxesEnabled ? Math.round(finalSgst) : 0;
+  const roundedVat = taxesEnabled ? Math.round(finalVat) : 0;
+  const totalTaxAmount = roundedCgst + roundedSgst + roundedVat;
 
   // Service Charge Calculation
   let serviceChargeAmount = 0;
   if (serviceChargeEnabled && !isComplimentaryBill && !isNonChargeableBill && postDiscountSubtotal > 0) {
-    serviceChargeAmount = (postDiscountSubtotal * serviceChargeRate) / 100;
+    serviceChargeAmount = Math.round((postDiscountSubtotal * serviceChargeRate) / 100);
   }
 
-  let finalAmount = isComplimentaryBill || isNonChargeableBill ? 0 : (postDiscountSubtotal + totalTaxAmount + serviceChargeAmount);
+  const finalAmount = isComplimentaryBill || isNonChargeableBill ? 0 : Math.max(0, postDiscountSubtotal + totalTaxAmount + serviceChargeAmount);
 
   return {
     items: processedItems,
-    subtotal: Number(subtotal.toFixed(2)),
-    billDiscountAmount: Number(billDiscountAmount.toFixed(2)),
+    subtotal: roundedSubtotal,
+    billDiscountAmount: roundedDiscount,
     taxableAmountGST: Number(taxableAmountGST.toFixed(2)),
     taxableAmountVAT: Number(taxableAmountVAT.toFixed(2)),
-    cgstAmount: Number(finalCgst.toFixed(2)),
-    sgstAmount: Number(finalSgst.toFixed(2)),
-    vatAmount: Number(finalVat.toFixed(2)),
-    totalTaxAmount: Number(totalTaxAmount.toFixed(2)),
+    cgstAmount: roundedCgst,
+    sgstAmount: roundedSgst,
+    vatAmount: roundedVat,
+    totalTaxAmount,
     serviceChargeRate,
-    serviceChargeAmount: Number(serviceChargeAmount.toFixed(2)),
-    finalAmount: Number(Math.round(finalAmount))
+    serviceChargeAmount,
+    finalAmount
   };
 };
 
