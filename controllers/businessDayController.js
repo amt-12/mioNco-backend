@@ -64,6 +64,7 @@ exports.startBusinessDay = async (req, res) => {
 // Helper function to calculate comprehensive shift metrics from bills, paid orders, and spoilages
 const calculateShiftMetrics = (orders, bills, spoilages, openingFloat = 0) => {
   let grossSales = 0;
+  let netSales = 0;
   let totalTax = 0;
   let totalDiscounts = 0;
   let cashSales = 0;
@@ -80,15 +81,35 @@ const calculateShiftMetrics = (orders, bills, spoilages, openingFloat = 0) => {
     const isVoided = b.status === 'Voided' || b.paymentStatus === 'Voided';
     if (isCancelled || isVoided) return;
 
-    const bAmount = b.finalAmount || b.amountPaid || b.subtotal || 0;
-    grossSales += (b.subtotal || bAmount);
-    totalTax += (b.totalTaxAmount || ((b.cgstAmount || 0) + (b.sgstAmount || 0) + (b.vatAmount || 0)) || 0);
-    totalDiscounts += ((b.billDiscountAmount || 0) + (b.itemLevelDiscounts || 0));
-
     // Track which orders are covered by this bill
     (b.orders || []).forEach(oId => {
       if (oId) countedOrderIds.add(oId.toString());
     });
+
+    const isNC = b.isNonChargeableBill || b.isComplimentaryBill || b.paymentStatus === 'Non-Chargeable';
+    if (isNC) {
+      const origVal = (b.items || []).reduce((s, it) => s + ((it.unitPrice || 0) * (it.quantity || 1)), 0);
+      complimentarySales += (origVal || b.subtotal || b.finalAmount || 0);
+      return;
+    }
+
+    const isHold = b.paymentStatus === 'Hold';
+    const isPending = b.paymentStatus === 'Pending' || (!b.paymentStatus && b.status !== 'Settled');
+    if (isHold || isPending) {
+      // Pending and Hold bills are uncollected / deferred, do not include in realized shift sales
+      return;
+    }
+
+    const bDisc = Number((b.billDiscountAmount || 0) + (b.itemLevelDiscounts || 0));
+    const bNet = Math.max(0, (b.subtotal || 0) - bDisc);
+    const bTax = b.totalTaxAmount || ((b.cgstAmount || 0) + (b.sgstAmount || 0) + (b.vatAmount || 0)) || 0;
+    const bSC = (b.serviceChargeEnabled !== false && b.serviceChargeRate !== 0) ? (b.serviceChargeAmount || 0) : 0;
+    const bGross = b.finalAmount || (bNet + bTax + bSC);
+
+    grossSales += bGross;
+    netSales += bNet;
+    totalTax += bTax;
+    totalDiscounts += bDisc;
 
     // Check payments array
     if (Array.isArray(b.payments) && b.payments.length > 0) {
@@ -107,18 +128,16 @@ const calculateShiftMetrics = (orders, bills, spoilages, openingFloat = 0) => {
     } else {
       // If no payments array but marked paid or settled
       const method = (b.paymentMethod || '').toLowerCase();
-      const paidAmt = b.amountPaid || (b.paymentStatus === 'Hold' ? 0 : bAmount);
+      const paidAmt = Number(b.amountPaid || bGross);
       if (b.isNonChargeableBill || b.isComplimentaryBill || b.paymentStatus === 'Non-Chargeable') {
         complimentarySales += paidAmt;
-      } else if (b.paymentStatus === 'Hold') {
-        // Hold bills are deferred receivables, not collected cash
       } else if (method.includes('upi')) {
         upiSales += paidAmt;
       } else if (method.includes('card')) {
         cardSales += paidAmt;
       } else if (method.includes('online') || method.includes('air') || method.includes('qr')) {
         onlineSales += paidAmt;
-      } else if ((b.paymentStatus === 'Paid' || b.status === 'Settled') && b.paymentStatus !== 'Hold') {
+      } else {
         cashSales += paidAmt;
       }
     }
@@ -127,16 +146,24 @@ const calculateShiftMetrics = (orders, bills, spoilages, openingFloat = 0) => {
   // 2. Process paid orders not covered by any counted bill
   orders.forEach(ord => {
     if (countedOrderIds.has(ord._id.toString())) return;
-
-    const isPaid = ord.paymentStatus === 'Paid' || ord.status === 'Completed';
+    const isOrdNC = ord.paymentStatus === 'Non-Chargeable' || ord.paymentMethod === 'NC';
+    const isPaid = (ord.paymentStatus === 'Paid' || isOrdNC) && ord.paymentStatus !== 'Pending';
     if (!isPaid) return;
+
+    if (isOrdNC) {
+      const origVal = (ord.items || []).reduce((s, it) => s + ((it.unitPrice || 0) * (it.quantity || 1)), 0);
+      complimentarySales += (origVal || ord.total || ord.subtotal || 0);
+      return;
+    }
 
     const ordActiveItems = (ord.items || []).filter(i => i.status !== 'Cancelled');
     const itemsTotal = ordActiveItems.reduce((sum, i) => sum + (i.totalPrice || (i.unitPrice * i.quantity) || 0), 0);
     const ordAmount = ord.total || itemsTotal || ord.subtotal || 0;
     const ordTax = ord.tax || 0;
+    const ordNet = ord.subtotal || (ordAmount - ordTax);
 
-    grossSales += (ord.subtotal || ordAmount);
+    grossSales += ordAmount;
+    netSales += ordNet;
     totalTax += ordTax;
 
     const method = (ord.paymentMethod || '').toLowerCase();
@@ -178,7 +205,7 @@ const calculateShiftMetrics = (orders, bills, spoilages, openingFloat = 0) => {
 
   return {
     grossSales: Number(grossSales.toFixed(2)),
-    netSales: Number((grossSales - totalTax).toFixed(2)),
+    netSales: Number(netSales.toFixed(2)),
     totalTax: Number(totalTax.toFixed(2)),
     totalDiscounts: Number(totalDiscounts.toFixed(2)),
     cashSales: Number(cashSales.toFixed(2)),

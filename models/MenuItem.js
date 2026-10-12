@@ -101,7 +101,7 @@ const MenuItemSchema = new mongoose.Schema({
   publishState: {
     type: String,
     enum: ['Draft', 'Pending Review', 'Published', 'Hidden', 'Scheduled', 'Archived', 'Expired'],
-    default: 'Draft'
+    default: 'Published'
   },
   
   // Marketing & Visibility

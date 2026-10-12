@@ -173,6 +173,8 @@ const billSchema = new mongoose.Schema({
     floorName: String
   },
   coveredTables: [{ type: String }],
+  covers: { type: Number, default: null },
+  pax: { type: Number, default: null },
   notes: String
 }, {
   timestamps: true

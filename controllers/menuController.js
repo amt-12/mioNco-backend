@@ -195,7 +195,11 @@ exports.getItems = async (req, res) => {
 exports.getItem = async (req, res) => {
   try {
     const item = await MenuItem.findById(req.params.id)
-      .populate('section recommendedPairings similarDishes createdBy updatedBy');
+      .populate({
+        path: 'section',
+        populate: { path: 'floors', select: 'name floorNumber slug' }
+      })
+      .populate('recommendedPairings similarDishes createdBy updatedBy');
     if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
     res.status(200).json({ success: true, data: item });
   } catch (err) {

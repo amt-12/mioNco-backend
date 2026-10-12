@@ -5,7 +5,7 @@ const MenuSectionSchema = new mongoose.Schema({
   description: String,
   bannerImage: String,
   status: { type: String, enum: ['Active', 'Inactive'], default: 'Active' },
-  publishState: { type: String, enum: ['Published', 'Draft'], default: 'Draft' },
+  publishState: { type: String, enum: ['Published', 'Draft'], default: 'Published' },
   visibility: { type: String, enum: ['Public', 'Hidden', 'Internal'], default: 'Public' },
   seoMetadata: {
     title: String,

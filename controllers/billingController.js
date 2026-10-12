@@ -2564,6 +2564,8 @@ exports.getDailySalesReport = async (req, res) => {
       .populate('table')
       .populate('createdBy', 'name role email')
       .populate('ncEmployee', 'name role')
+      .populate('orders', 'orderId pax guests items')
+      .populate('session', 'sessionId guests pax')
       .sort({ createdAt: -1 });
 
     // Fetch Spoilage Records strictly within the day's date window
@@ -2574,7 +2576,7 @@ exports.getDailySalesReport = async (req, res) => {
       .populate('employeeId', 'name role')
       .sort({ createdAt: -1 });
 
-    // Calculate Running Sales from unpaid placed orders of the day
+    // Calculate Running Sales from unpaid placed orders and pending bills of the day
     let runningSales = 0;
     let runningOrdersCount = 0;
     let cancelledOrdersCount = 0;
@@ -2601,6 +2603,8 @@ exports.getDailySalesReport = async (req, res) => {
         });
       }
     });
+
+    const countedBillIdsInRunningSales = new Set();
 
     orders.forEach(ord => {
       const isCancelled = ord.status === 'Cancelled';
@@ -2630,9 +2634,16 @@ exports.getDailySalesReport = async (req, res) => {
       const orderItemsTotal = orderActiveItems.reduce((sum, item) => sum + (item.isSpoiled ? 0 : (item.totalPrice || (item.unitPrice * item.quantity) || 0)), 0);
       
       const unpaidBill = unpaidBillMap.get(String(ord._id));
-      const orderAmount = unpaidBill?.finalAmount || orderItemsTotal || ord.total || ord.subtotal || 0;
+      const orderAmount = orderItemsTotal || ord.total || ord.subtotal || 0;
 
-      runningSales += orderAmount;
+      if (unpaidBill) {
+        if (!countedBillIdsInRunningSales.has(String(unpaidBill._id))) {
+          runningSales += (unpaidBill.finalAmount || orderAmount);
+          countedBillIdsInRunningSales.add(String(unpaidBill._id));
+        }
+      } else {
+        runningSales += orderAmount;
+      }
 
       runningOrdersList.push({
         _id: ord._id,
@@ -2644,21 +2655,37 @@ exports.getDailySalesReport = async (req, res) => {
         paymentStatus: 'Unpaid',
         itemCount: orderActiveItems.length,
         itemsSummary: orderActiveItems.map(i => `${i.quantity}x ${i.foodName || 'Item'}`).join(', '),
-        amount: orderAmount,
+        amount: unpaidBill ? (unpaidBill.finalAmount || orderAmount) : orderAmount,
         waiter: ord.waiter?.name || 'Staff',
         timestamp: ord.createdAt
       });
     });
 
+    // Also include any pending bills of the day not already captured through orders
+    bills.forEach(b => {
+      if (b.status === 'Merged' || b.paymentStatus === 'Merged' || b.status === 'Cancelled' || b.status === 'Voided') return;
+      const isPending = b.paymentStatus === 'Pending' || (!b.paymentStatus && b.status !== 'Settled');
+      if (isPending && !countedBillIdsInRunningSales.has(String(b._id))) {
+        runningSales += (b.finalAmount || 0);
+        countedBillIdsInRunningSales.add(String(b._id));
+      }
+    });
+
     // Summary Aggregations
     let grossSales = 0;
+    let netSales = 0;
     let totalDiscounts = 0;
     let totalNonChargeable = 0;
     let totalSpoilageValue = 0;
     let totalServiceCharge = 0;
     let totalTaxes = 0;
     let netCollection = 0;
+    let totalCovers = 0;
     let totalBillsCount = bills.filter(b => b.status !== 'Merged' && b.paymentStatus !== 'Merged').length;
+    let settledBillsCount = 0;
+    let pendingBillsCount = 0;
+    let pendingBillsTotal = 0;
+    let ncBillsCount = 0;
     let voidedBillsCount = 0;
     let cancelledBillsCount = 0;
     let serviceChargeRemovalsCount = 0;
@@ -2758,61 +2785,9 @@ exports.getDailySalesReport = async (req, res) => {
         return;
       }
 
-      // Valid Active / Paid / Settled Bill
-      grossSales += (bill.subtotal || 0);
-      totalTaxes += (bill.totalTaxAmount || 0);
-      const isHold = bill.paymentStatus === 'Hold';
-      const settledAmt = isHold ? 0 : (bill.amountPaid || bill.finalAmount || 0);
-      netCollection += settledAmt;
-
-      const isPaidBill = !isHold && (bill.paymentStatus === 'Paid' || settledAmt > 0);
-      if (isPaidBill && bill.paymentStatus !== 'Non-Chargeable' && !bill.isNonChargeableBill) {
-        if (bill.payments && bill.payments.length > 0) {
-          bill.payments.forEach(p => {
-            const mode = p.mode || 'Cash';
-            if (mode === 'Hold') return;
-            const amt = Number(p.amount) || 0;
-            if (!paymentMethodsMap[mode]) paymentMethodsMap[mode] = { mode, totalAmount: 0, count: 0 };
-            paymentMethodsMap[mode].totalAmount += amt;
-            paymentMethodsMap[mode].count += 1;
-          });
-        } else {
-          const mode = bill.paymentMethod || 'Cash';
-          if (!paymentMethodsMap[mode]) paymentMethodsMap[mode] = { mode, totalAmount: 0, count: 0 };
-          paymentMethodsMap[mode].totalAmount += settledAmt;
-          paymentMethodsMap[mode].count += 1;
-        }
-      }
-
       (bill.orders || []).forEach(oId => {
         if (oId) countedOrderIds.add(oId.toString());
       });
-
-      // Discounts on Bill
-      let discAmt = Number((bill.billDiscountAmount || 0) + (bill.itemLevelDiscounts || 0));
-      if (discAmt <= 0 && Number(bill.billDiscountValue || 0) > 0 && bill.billDiscountType !== 'None' && bill.billDiscountType !== 'Non-Chargeable') {
-        const baseSubtotal = (bill.items || []).reduce((s, it) => s + ((it.unitPrice || 0) * (it.quantity || 1)), 0) || bill.subtotal || 0;
-        if (bill.billDiscountType === 'Percentage') {
-          discAmt = (baseSubtotal * Number(bill.billDiscountValue)) / 100;
-        } else if (bill.billDiscountType === 'Fixed') {
-          discAmt = Number(bill.billDiscountValue);
-        }
-      }
-
-      if (discAmt > 0) {
-        totalDiscounts += discAmt;
-        discountReport.push({
-          billNumber: bill.billNumber,
-          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : (bill.table?.name || 'Dine-In'),
-          subtotal: bill.subtotal || 0,
-          discountType: bill.billDiscountType || 'Discount',
-          discountValue: bill.billDiscountValue || discAmt,
-          discountAmount: discAmt,
-          reason: bill.billDiscountReason || 'Customer Discount',
-          staff: bill.createdBy?.name || bill.discountGivenBy || 'Staff',
-          timestamp: bill.createdAt
-        });
-      }
 
       // Non-Chargeable / Complimentary Bill
       const isNCBill = bill.isNonChargeableBill || 
@@ -2822,6 +2797,7 @@ exports.getDailySalesReport = async (req, res) => {
                        (bill.payments || []).some(p => p.mode === 'NC');
 
       if (isNCBill) {
+        ncBillsCount++;
         const originalItemVal = (bill.items || []).reduce((s, it) => s + ((it.unitPrice || 0) * (it.quantity || 1)), 0);
         const ncVal = originalItemVal || bill.subtotal || bill.finalAmount || 0;
         totalNonChargeable += ncVal;
@@ -2835,6 +2811,125 @@ exports.getDailySalesReport = async (req, res) => {
           staff: bill.ncEmployee?.name || bill.createdBy?.name || bill.discountGivenBy || 'Staff',
           timestamp: bill.createdAt
         });
+      } else {
+        // Valid Chargeable / Paid / Settled / Pending / Hold Bill
+        const isHold = bill.paymentStatus === 'Hold';
+        const isPending = bill.paymentStatus === 'Pending' || (!bill.paymentStatus && bill.status !== 'Settled');
+        const isPartiallyPaid = bill.paymentStatus === 'Partially Paid';
+        const isPaid = (bill.paymentStatus === 'Paid' || bill.status === 'Settled') && !isHold && !isPending;
+
+        if (isPending) {
+          // Open / Unpaid bill pending payment at table (e.g. ₹8,091 Pending amount)
+          pendingBillsCount++;
+          pendingBillsTotal += (bill.finalAmount || 0);
+        } else if (isHold) {
+          // Hold (Pay Later) bill - tracked separately under pendingHoldList
+        } else if (isPaid || isPartiallyPaid) {
+          // Settled or Partially Paid Bill
+          if (isPaid) {
+            settledBillsCount++;
+          }
+
+          // Discounts on Bill
+          let discAmt = Number((bill.billDiscountAmount || 0) + (bill.itemLevelDiscounts || 0));
+          if (discAmt <= 0 && Number(bill.billDiscountValue || 0) > 0 && bill.billDiscountType !== 'None' && bill.billDiscountType !== 'Non-Chargeable') {
+            const baseSubtotal = (bill.items || []).reduce((s, it) => s + ((it.unitPrice || 0) * (it.quantity || 1)), 0) || bill.subtotal || 0;
+            if (bill.billDiscountType === 'Percentage') {
+              discAmt = (baseSubtotal * Number(bill.billDiscountValue)) / 100;
+            } else if (bill.billDiscountType === 'Fixed') {
+              discAmt = Number(bill.billDiscountValue);
+            }
+          }
+
+          if (discAmt > 0) {
+            totalDiscounts += discAmt;
+            discountReport.push({
+              billNumber: bill.billNumber,
+              tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : (bill.table?.name || 'Dine-In'),
+              subtotal: bill.subtotal || 0,
+              discountType: bill.billDiscountType || 'Discount',
+              discountValue: bill.billDiscountValue || discAmt,
+              discountAmount: discAmt,
+              reason: bill.billDiscountReason || 'Customer Discount',
+              staff: bill.createdBy?.name || bill.discountGivenBy || 'Staff',
+              timestamp: bill.createdAt
+            });
+          }
+
+          // Net Sale: Subtotal after discount, excluding GST and Service Charge
+          const billNetSale = Math.max(0, (bill.subtotal || 0) - discAmt);
+          const billTax = bill.totalTaxAmount || 0;
+          const billSC = (bill.serviceChargeEnabled !== false && bill.serviceChargeRate !== 0) ? (bill.serviceChargeAmount || 0) : 0;
+          
+          // Gross Sale: Final billed amount including taxes and service charge
+          const billGrossSale = bill.finalAmount || (billNetSale + billTax + billSC);
+
+          // Covers for this bill
+          const bCovers = Number(
+            bill.covers || 
+            bill.pax || 
+            (bill.orders && bill.orders.length > 0
+              ? bill.orders.reduce((sum, o) => sum + Number(o?.pax || o?.guests || 0), 0)
+              : 0) || 
+            bill.session?.guests || 
+            1
+          );
+
+          if (isPaid) {
+            grossSales += billGrossSale;
+            netSales += billNetSale;
+            totalTaxes += billTax;
+            totalServiceCharge += billSC;
+            totalCovers += bCovers;
+
+            // Cash / Bank Collections
+            const settledAmt = Number(bill.amountPaid || bill.finalAmount || 0);
+            netCollection += settledAmt;
+
+            if (bill.payments && bill.payments.length > 0) {
+              bill.payments.forEach(p => {
+                const mode = p.mode || 'Cash';
+                if (mode === 'Hold') return;
+                const amt = Number(p.amount) || 0;
+                if (!paymentMethodsMap[mode]) paymentMethodsMap[mode] = { mode, totalAmount: 0, count: 0 };
+                paymentMethodsMap[mode].totalAmount += amt;
+                paymentMethodsMap[mode].count += 1;
+              });
+            } else {
+              const mode = bill.paymentMethod || 'Cash';
+              if (!paymentMethodsMap[mode]) paymentMethodsMap[mode] = { mode, totalAmount: 0, count: 0 };
+              paymentMethodsMap[mode].totalAmount += settledAmt;
+              paymentMethodsMap[mode].count += 1;
+            }
+          } else if (isPartiallyPaid) {
+            const settledAmt = Number(bill.amountPaid || 0);
+            if (settledAmt > 0) {
+              netCollection += settledAmt;
+              grossSales += settledAmt;
+              const ratio = bill.finalAmount > 0 ? (settledAmt / bill.finalAmount) : 1;
+              netSales += (billNetSale * ratio);
+              totalTaxes += (billTax * ratio);
+              totalServiceCharge += (billSC * ratio);
+              totalCovers += bCovers;
+
+              if (bill.payments && bill.payments.length > 0) {
+                bill.payments.forEach(p => {
+                  const mode = p.mode || 'Cash';
+                  if (mode === 'Hold') return;
+                  const amt = Number(p.amount) || 0;
+                  if (!paymentMethodsMap[mode]) paymentMethodsMap[mode] = { mode, totalAmount: 0, count: 0 };
+                  paymentMethodsMap[mode].totalAmount += amt;
+                  paymentMethodsMap[mode].count += 1;
+                });
+              } else {
+                const mode = bill.paymentMethod || 'Cash';
+                if (!paymentMethodsMap[mode]) paymentMethodsMap[mode] = { mode, totalAmount: 0, count: 0 };
+                paymentMethodsMap[mode].totalAmount += settledAmt;
+                paymentMethodsMap[mode].count += 1;
+              }
+            }
+          }
+        }
       }
 
       // Individual NC / Complimentary Items inside bills
@@ -2867,10 +2962,11 @@ exports.getDailySalesReport = async (req, res) => {
         }
       });
 
-      // Service Charge Logic
-      if (bill.serviceChargeEnabled === false || bill.serviceChargeRate === 0) {
+      // Service Charge Logic (only for paid/settled bills)
+      const isPaidBillForSC = (bill.paymentStatus === 'Paid' || bill.status === 'Settled') && bill.paymentStatus !== 'Hold' && bill.paymentStatus !== 'Pending';
+      if (isPaidBillForSC && (bill.serviceChargeEnabled === false || bill.serviceChargeRate === 0)) {
         serviceChargeRemovalsCount++;
-        const waivedAmount = (bill.subtotal * 0.05);
+        const waivedAmount = ((bill.subtotal || 0) * 0.05);
         serviceChargeRemovedAmount += waivedAmount;
         scRemovalLogs.push({
           billNumber: bill.billNumber,
@@ -2882,7 +2978,7 @@ exports.getDailySalesReport = async (req, res) => {
           timestamp: bill.createdAt
         });
       } else {
-        totalServiceCharge += (bill.serviceChargeAmount || 0);
+        // totalServiceCharge already accumulated above
       }
 
       // Check Bill Modifications / Splits
@@ -2900,7 +2996,7 @@ exports.getDailySalesReport = async (req, res) => {
     // Also attribute revenue and audit NC/complimentary/discounts from Orders
     orders.forEach(ord => {
       const isOrdNC = ord.paymentStatus === 'Non-Chargeable' || ord.paymentMethod === 'NC' || ord.paymentMethod === 'Non-Chargeable';
-      const isPaid = ord.paymentStatus === 'Paid' || ord.status === 'Completed' || isOrdNC;
+      const isPaid = (ord.paymentStatus === 'Paid' || isOrdNC) && ord.paymentStatus !== 'Pending';
       const linkedBill = bills.find(b => 
         (b.orders || []).some(oId => String(oId) === String(ord._id)) || 
         (ord.bill && String(b._id) === String(ord.bill))
@@ -2980,13 +3076,16 @@ exports.getDailySalesReport = async (req, res) => {
       // Revenue accounting for standalone paid orders without a separate Bill
       if (!countedOrderIds.has(ord._id.toString()) && isPaid && !isOrdNC) {
         const ordActiveItems = (ord.items || []).filter(i => i.status !== 'Cancelled');
-        const itemsTotal = ordActiveItems.reduce((sum, i) => sum + (i.totalPrice || (i.unitPrice * i.quantity) || 0), 0);
+        const itemsTotal = ordActiveItems.reduce((sum, i) => sum + (i.isSpoiled ? 0 : (i.totalPrice || (i.unitPrice * i.quantity) || 0)), 0);
         const ordAmount = ord.total || itemsTotal || ord.subtotal || 0;
         const ordTax = ord.tax || 0;
+        const ordNet = ord.subtotal || (ordAmount - ordTax);
 
-        grossSales += (ord.subtotal || (ordAmount - ordTax));
+        grossSales += ordAmount;
+        netSales += ordNet;
         totalTaxes += ordTax;
         netCollection += ordAmount;
+        totalCovers += Number(ord.pax || ord.guests || 1);
 
         const mode = ord.paymentMethod || 'Cash';
         if (!paymentMethodsMap[mode]) paymentMethodsMap[mode] = { mode, totalAmount: 0, count: 0 };
@@ -3026,32 +3125,48 @@ exports.getDailySalesReport = async (req, res) => {
 
     const billsList = bills
       .filter(b => b.status !== 'Merged' && b.paymentStatus !== 'Merged')
-      .map(b => ({
-        _id: b._id,
-        billNumber: b.billNumber,
-        tableName: b.table?.tableNumber ? `Table ${b.table.tableNumber}` : (b.table?.name || 'Takeaway/Walk-in'),
-        subtotal: b.subtotal || 0,
-        discount: Number((b.billDiscountAmount || 0) + (b.itemLevelDiscounts || 0)),
-        tax: b.totalTaxAmount || 0,
-        serviceCharge: b.serviceChargeAmount || 0,
-        finalAmount: b.finalAmount || 0,
-        amountPaid: b.amountPaid || 0,
-        balanceDue: b.paymentStatus === 'Hold' ? (b.balanceDue || b.finalAmount) : (b.balanceDue || 0),
-        paymentStatus: b.paymentStatus || 'Pending',
-        status: b.status || 'Active',
-        paymentModes: b.paymentStatus === 'Hold'
-          ? 'Hold (Pay Later)'
-          : ((b.payments && b.payments.length > 0)
-            ? [...new Set(b.payments.map(p => p.mode || 'Cash'))].join(', ')
-            : (b.paymentStatus === 'Non-Chargeable' || b.isNonChargeableBill ? 'Non-Chargeable' : (b.paymentMethod || 'Unpaid'))),
-        holdGuestName: b.holdGuestName || '',
-        holdGuestPhone: b.holdGuestPhone || '',
-        holdNotes: b.holdNotes || '',
-        holdAuthorizedBy: b.holdAuthorizedBy || '',
-        holdDate: b.holdDate || null,
-        staff: b.createdBy?.name || b.ncEmployee?.name || 'Staff',
-        timestamp: b.createdAt
-      }));
+      .map(b => {
+        const isNC = b.isNonChargeableBill || b.isComplimentaryBill || b.paymentStatus === 'Non-Chargeable';
+        const bDisc = isNC ? 0 : Number((b.billDiscountAmount || 0) + (b.itemLevelDiscounts || 0));
+        const bNet = isNC ? 0 : Math.max(0, (b.subtotal || 0) - bDisc);
+        const bGross = isNC ? 0 : (b.finalAmount || 0);
+        const bCovers = Number(
+          b.covers || 
+          b.pax || 
+          (b.orders && b.orders.length > 0 ? b.orders.reduce((sum, o) => sum + Number(o?.pax || o?.guests || 0), 0) : 0) || 
+          b.session?.guests || 
+          1
+        );
+        return {
+          _id: b._id,
+          billNumber: b.billNumber,
+          tableName: b.table?.tableNumber ? `Table ${b.table.tableNumber}` : (b.table?.name || 'Takeaway/Walk-in'),
+          subtotal: b.subtotal || 0,
+          netSale: bNet,
+          grossSale: bGross,
+          covers: bCovers,
+          discount: bDisc,
+          tax: b.totalTaxAmount || 0,
+          serviceCharge: b.serviceChargeAmount || 0,
+          finalAmount: b.finalAmount || 0,
+          amountPaid: b.amountPaid || 0,
+          balanceDue: b.paymentStatus === 'Hold' ? (b.balanceDue || b.finalAmount) : (b.balanceDue || 0),
+          paymentStatus: b.paymentStatus || 'Pending',
+          status: b.status || 'Active',
+          paymentModes: b.paymentStatus === 'Hold'
+            ? 'Hold (Pay Later)'
+            : ((b.payments && b.payments.length > 0)
+              ? [...new Set(b.payments.map(p => p.mode || 'Cash'))].join(', ')
+              : (b.paymentStatus === 'Non-Chargeable' || b.isNonChargeableBill ? 'Non-Chargeable' : (b.paymentMethod || 'Unpaid'))),
+          holdGuestName: b.holdGuestName || '',
+          holdGuestPhone: b.holdGuestPhone || '',
+          holdNotes: b.holdNotes || '',
+          holdAuthorizedBy: b.holdAuthorizedBy || '',
+          holdDate: b.holdDate || null,
+          staff: b.createdBy?.name || b.ncEmployee?.name || 'Staff',
+          timestamp: b.createdAt
+        };
+      });
 
     // Fetch all currently pending Hold bills (from any date) where payment has not been collected yet
     const allPendingHoldBills = await Bill.find({
@@ -3078,6 +3193,81 @@ exports.getDailySalesReport = async (req, res) => {
       timestamp: b.createdAt
     }));
 
+    // Calculate Month-to-Date (MTD) Gross and Net Sales
+    let grossMTD = 0;
+    let netMTD = 0;
+
+    let mtdStartYear = todayY;
+    let mtdStartMonth = todayM;
+    if (startDate) {
+      const [sy, sm] = String(startDate).split('-').map(Number);
+      if (sy && sm) {
+        mtdStartYear = sy;
+        mtdStartMonth = sm;
+      }
+    } else if (date) {
+      const [dy, dm] = String(date).split('-').map(Number);
+      if (dy && dm) {
+        mtdStartYear = dy;
+        mtdStartMonth = dm;
+      }
+    }
+
+    const mtdStart = new Date(Date.UTC(mtdStartYear, mtdStartMonth - 1, 1, 0, 0, 0, 0) + tzOffsetMs);
+    const mtdEnd = end;
+
+    const mtdBills = await Bill.find({
+      $or: [
+        { createdAt: { $gte: mtdStart, $lte: mtdEnd } },
+        { 'payments.paidAt': { $gte: mtdStart, $lte: mtdEnd } }
+      ],
+      status: { $nin: ['Cancelled', 'Voided', 'Merged'] },
+      paymentStatus: { $in: ['Paid', 'Partially Paid'] }
+    });
+
+    const mtdCountedOrderIds = new Set();
+
+    mtdBills.forEach(b => {
+      const isNC = b.isNonChargeableBill || b.isComplimentaryBill || b.paymentStatus === 'Non-Chargeable';
+      if (!isNC) {
+        const bDisc = Number((b.billDiscountAmount || 0) + (b.itemLevelDiscounts || 0));
+        const bNet = Math.max(0, (b.subtotal || 0) - bDisc);
+        const bTax = b.totalTaxAmount || 0;
+        const bSC = (b.serviceChargeEnabled !== false && b.serviceChargeRate !== 0) ? (b.serviceChargeAmount || 0) : 0;
+        const bGross = b.finalAmount || (bNet + bTax + bSC);
+        grossMTD += bGross;
+        netMTD += bNet;
+      }
+      (b.orders || []).forEach(oId => {
+        if (oId) mtdCountedOrderIds.add(oId.toString());
+      });
+    });
+
+    const mtdOrders = await Order.find({
+      $or: [
+        { createdAt: { $gte: mtdStart, $lte: mtdEnd } },
+        { 'paymentDetails.paidAt': { $gte: mtdStart, $lte: mtdEnd } }
+      ],
+      status: { $nin: ['Cancelled'] },
+      paymentStatus: { $in: ['Paid', 'Completed'] }
+    });
+
+    mtdOrders.forEach(ord => {
+      const isOrdNC = ord.paymentStatus === 'Non-Chargeable' || ord.paymentMethod === 'NC';
+      if (!mtdCountedOrderIds.has(ord._id.toString()) && !isOrdNC) {
+        const ordActiveItems = (ord.items || []).filter(i => i.status !== 'Cancelled');
+        const itemsTotal = ordActiveItems.reduce((sum, i) => sum + (i.isSpoiled ? 0 : (i.totalPrice || (i.unitPrice * i.quantity) || 0)), 0);
+        const ordAmount = ord.total || itemsTotal || ord.subtotal || 0;
+        const ordTax = ord.tax || 0;
+        const ordNet = ord.subtotal || (ordAmount - ordTax);
+
+        grossMTD += ordAmount;
+        netMTD += ordNet;
+      }
+    });
+
+    const apc = totalCovers > 0 ? Number((grossSales / totalCovers).toFixed(2)) : 0;
+
     return res.status(200).json({
       success: true,
       data: {
@@ -3086,24 +3276,35 @@ exports.getDailySalesReport = async (req, res) => {
           endDate: end
         },
         summary: {
-          runningSales,
+          runningSales: Number(runningSales.toFixed(2)),
           runningOrdersCount,
           totalOrdersCount: orders.length,
           cancelledOrdersCount,
-          grossSales,
-          totalDiscounts,
-          totalNonChargeable,
-          totalSpoilageValue,
-          totalServiceCharge,
+          grossSales: Number(grossSales.toFixed(2)),
+          netSales: Number(netSales.toFixed(2)),
+          totalDiscounts: Number(totalDiscounts.toFixed(2)),
+          totalNonChargeable: Number(totalNonChargeable.toFixed(2)),
+          totalSpoilageValue: Number(totalSpoilageValue.toFixed(2)),
+          totalServiceCharge: Number(totalServiceCharge.toFixed(2)),
           serviceChargeRemovalsCount,
-          serviceChargeRemovedAmount,
-          totalTaxes,
-          netCollection,
+          serviceChargeRemovedAmount: Number(serviceChargeRemovedAmount.toFixed(2)),
+          totalTaxes: Number(totalTaxes.toFixed(2)),
+          totalCollections: Number(netCollection.toFixed(2)),
+          netCollection: Number(netCollection.toFixed(2)),
+          totalCovers,
+          covers: totalCovers,
+          apc: Number(apc.toFixed(2)),
+          grossMTD: Number(grossMTD.toFixed(2)),
+          netMTD: Number(netMTD.toFixed(2)),
           totalBillsCount,
+          settledBillsCount,
+          pendingBillsCount,
+          pendingBillsTotal: Number(pendingBillsTotal.toFixed(2)),
+          ncBillsCount,
           voidedBillsCount,
           cancelledBillsCount,
           pendingHoldCount: pendingHoldList.length,
-          pendingHoldTotal: pendingHoldList.reduce((sum, h) => sum + (h.balanceDue || h.finalAmount || 0), 0),
+          pendingHoldTotal: Number(pendingHoldList.reduce((sum, h) => sum + (h.balanceDue || h.finalAmount || 0), 0).toFixed(2)),
           paymentMethodsBreakdown: Object.values(paymentMethodsMap).map(pm => ({
             mode: pm.mode,
             totalAmount: Number(pm.totalAmount.toFixed(2)),
