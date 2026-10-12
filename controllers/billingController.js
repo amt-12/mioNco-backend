@@ -2303,13 +2303,15 @@ exports.recordPayment = async (req, res) => {
 
       // Update all associated Order documents to Paid (or Hold) & Completed
       if (bill.orders && bill.orders.length > 0) {
+        const targetOrderPaymentStatus = bill.paymentStatus === 'Hold' ? 'Hold' : (bill.paymentStatus === 'Non-Chargeable' ? 'Non-Chargeable' : 'Paid');
+        const targetOrderPaymentMethod = bill.paymentStatus === 'Hold' ? 'Hold' : (bill.paymentStatus === 'Non-Chargeable' ? 'NC' : (bill.paymentMethod || 'Cash'));
         await Order.updateMany(
           { _id: { $in: bill.orders } },
-          { paymentStatus: bill.paymentStatus === 'Hold' ? 'Hold' : 'Paid', status: 'Completed' }
+          { paymentStatus: targetOrderPaymentStatus, paymentMethod: targetOrderPaymentMethod, status: 'Completed' }
         );
         if (io) {
           bill.orders.forEach(oId => {
-            io.emit('order_status_updated', { _id: oId, paymentStatus: bill.paymentStatus === 'Hold' ? 'Hold' : 'Paid', status: 'Completed', table: bill.table });
+            io.emit('order_status_updated', { _id: oId, paymentStatus: targetOrderPaymentStatus, paymentMethod: targetOrderPaymentMethod, status: 'Completed', table: bill.table });
           });
         }
       }
@@ -2594,13 +2596,29 @@ exports.getDailySalesReport = async (req, res) => {
       }
       const isBillPaid = b.paymentStatus === 'Paid' || b.paymentStatus === 'Non-Chargeable' || b.status === 'Settled' || b.status === 'Paid';
       if (isBillPaid) {
-        (b.orders || []).forEach(oId => paidOrderIds.add(String(oId)));
+        (b.orders || []).forEach(o => {
+          const idStr = o?._id ? o._id.toString() : (o ? o.toString() : null);
+          if (idStr && idStr !== '[object Object]') paidOrderIds.add(idStr);
+        });
       } else if (b.status !== 'Voided' && b.status !== 'Cancelled') {
-        (b.orders || []).forEach(oId => {
-          if (!unpaidBillMap.has(String(oId))) {
-            unpaidBillMap.set(String(oId), b);
+        (b.orders || []).forEach(o => {
+          const idStr = o?._id ? o._id.toString() : (o ? o.toString() : null);
+          if (idStr && idStr !== '[object Object]' && !unpaidBillMap.has(idStr)) {
+            unpaidBillMap.set(idStr, b);
           }
         });
+      }
+    });
+
+    // Also link orders that have ord.bill reference
+    orders.forEach(ord => {
+      if (ord.bill) {
+        const matchingBill = bills.find(b => String(b._id) === String(ord.bill));
+        if (matchingBill) {
+          const isBPaid = matchingBill.paymentStatus === 'Paid' || matchingBill.paymentStatus === 'Non-Chargeable' || matchingBill.status === 'Settled';
+          if (isBPaid) paidOrderIds.add(ord._id.toString());
+          else if (!unpaidBillMap.has(ord._id.toString())) unpaidBillMap.set(ord._id.toString(), matchingBill);
+        }
       }
     });
 
@@ -2785,8 +2803,9 @@ exports.getDailySalesReport = async (req, res) => {
         return;
       }
 
-      (bill.orders || []).forEach(oId => {
-        if (oId) countedOrderIds.add(oId.toString());
+      (bill.orders || []).forEach(o => {
+        const idStr = o?._id ? o._id.toString() : (o ? o.toString() : null);
+        if (idStr && idStr !== '[object Object]') countedOrderIds.add(idStr);
       });
 
       // Non-Chargeable / Complimentary Bill
@@ -2998,9 +3017,12 @@ exports.getDailySalesReport = async (req, res) => {
       const isOrdNC = ord.paymentStatus === 'Non-Chargeable' || ord.paymentMethod === 'NC' || ord.paymentMethod === 'Non-Chargeable';
       const isPaid = (ord.paymentStatus === 'Paid' || isOrdNC) && ord.paymentStatus !== 'Pending';
       const linkedBill = bills.find(b => 
-        (b.orders || []).some(oId => String(oId) === String(ord._id)) || 
+        (b.orders || []).some(o => (o?._id ? String(o._id) : String(o)) === String(ord._id)) || 
         (ord.bill && String(b._id) === String(ord.bill))
       );
+      if (linkedBill) {
+        countedOrderIds.add(ord._id.toString());
+      }
 
       // Check if order was whole Non-Chargeable
       if (isOrdNC) {
@@ -3073,8 +3095,8 @@ exports.getDailySalesReport = async (req, res) => {
         }
       }
 
-      // Revenue accounting for standalone paid orders without a separate Bill
-      if (!countedOrderIds.has(ord._id.toString()) && isPaid && !isOrdNC) {
+      // Revenue accounting strictly for standalone paid orders without ANY separate Bill
+      if (!countedOrderIds.has(ord._id.toString()) && !linkedBill && !ord.bill && isPaid && !isOrdNC) {
         const ordActiveItems = (ord.items || []).filter(i => i.status !== 'Cancelled');
         const itemsTotal = ordActiveItems.reduce((sum, i) => sum + (i.isSpoiled ? 0 : (i.totalPrice || (i.unitPrice * i.quantity) || 0)), 0);
         const ordAmount = ord.total || itemsTotal || ord.subtotal || 0;
@@ -3238,8 +3260,9 @@ exports.getDailySalesReport = async (req, res) => {
         grossMTD += bGross;
         netMTD += bNet;
       }
-      (b.orders || []).forEach(oId => {
-        if (oId) mtdCountedOrderIds.add(oId.toString());
+      (b.orders || []).forEach(o => {
+        const idStr = o?._id ? o._id.toString() : (o ? o.toString() : null);
+        if (idStr && idStr !== '[object Object]') mtdCountedOrderIds.add(idStr);
       });
     });
 
@@ -3254,7 +3277,7 @@ exports.getDailySalesReport = async (req, res) => {
 
     mtdOrders.forEach(ord => {
       const isOrdNC = ord.paymentStatus === 'Non-Chargeable' || ord.paymentMethod === 'NC';
-      if (!mtdCountedOrderIds.has(ord._id.toString()) && !isOrdNC) {
+      if (!mtdCountedOrderIds.has(ord._id.toString()) && !ord.bill && !isOrdNC) {
         const ordActiveItems = (ord.items || []).filter(i => i.status !== 'Cancelled');
         const itemsTotal = ordActiveItems.reduce((sum, i) => sum + (i.isSpoiled ? 0 : (i.totalPrice || (i.unitPrice * i.quantity) || 0)), 0);
         const ordAmount = ord.total || itemsTotal || ord.subtotal || 0;
@@ -3305,11 +3328,13 @@ exports.getDailySalesReport = async (req, res) => {
           cancelledBillsCount,
           pendingHoldCount: pendingHoldList.length,
           pendingHoldTotal: Number(pendingHoldList.reduce((sum, h) => sum + (h.balanceDue || h.finalAmount || 0), 0).toFixed(2)),
-          paymentMethodsBreakdown: Object.values(paymentMethodsMap).map(pm => ({
-            mode: pm.mode,
-            totalAmount: Number(pm.totalAmount.toFixed(2)),
-            count: pm.count
-          }))
+          paymentMethodsBreakdown: Object.values(paymentMethodsMap)
+            .filter(pm => pm.mode && pm.mode !== 'Pending' && pm.mode !== 'Hold' && pm.mode !== 'Unpaid')
+            .map(pm => ({
+              mode: pm.mode,
+              totalAmount: Number(pm.totalAmount.toFixed(2)),
+              count: pm.count
+            }))
         },
         reports: {
           billsList,
