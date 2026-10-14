@@ -786,7 +786,7 @@ exports.generateBill = async (req, res) => {
 // @access  Private
 exports.getBills = async (req, res) => {
   try {
-    const { status, paymentStatus, search, page = 1, limit = 100, table, order, session, isSplit, period, givenBy } = req.query;
+    const { status, paymentStatus, search, page = 1, limit = 100, table, order, session, isSplit, period, date, startDate, endDate, timezoneOffset, givenBy } = req.query;
 
     const query = {};
     if (status && status !== 'ALL') {
@@ -800,10 +800,50 @@ exports.getBills = async (req, res) => {
     if (session) query.session = session;
     if (isSplit !== undefined) query['splitInfo.isSplit'] = isSplit === 'true';
 
-    if (period) {
+    // Timezone offset in minutes (e.g. -330 for UTC+05:30 IST)
+    const tzOffsetMinutes = timezoneOffset !== undefined && !isNaN(Number(timezoneOffset)) 
+      ? Number(timezoneOffset) 
+      : -330;
+    const tzOffsetMs = tzOffsetMinutes * 60 * 1000;
+
+    if (startDate && endDate) {
+      const sParts = String(startDate).split('-');
+      const eParts = String(endDate).split('-');
+      let sDate, eDate;
+      if (sParts.length === 3 && eParts.length === 3) {
+        const [sY, sM, sD] = sParts.map(Number);
+        const [eY, eM, eD] = eParts.map(Number);
+        sDate = new Date(Date.UTC(sY, sM - 1, sD, 0, 0, 0, 0) + tzOffsetMs);
+        eDate = new Date(Date.UTC(eY, eM - 1, eD, 23, 59, 59, 999) + tzOffsetMs);
+      } else {
+        sDate = new Date(startDate);
+        sDate.setHours(0, 0, 0, 0);
+        eDate = new Date(endDate);
+        eDate.setHours(23, 59, 59, 999);
+      }
+      query.createdAt = { $gte: sDate, $lte: eDate };
+    } else if (date) {
+      const parts = String(date).split('-');
+      let sDate, eDate;
+      if (parts.length === 3) {
+        const [year, month, day] = parts.map(Number);
+        sDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0) + tzOffsetMs);
+        eDate = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999) + tzOffsetMs);
+      } else {
+        sDate = new Date(date);
+        sDate.setHours(0, 0, 0, 0);
+        eDate = new Date(date);
+        eDate.setHours(23, 59, 59, 999);
+      }
+      query.createdAt = { $gte: sDate, $lte: eDate };
+    } else if (period) {
       const now = new Date();
       if (period === 'today') {
-        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const localNow = new Date(now.getTime() - tzOffsetMs);
+        const y = localNow.getUTCFullYear();
+        const m = localNow.getUTCMonth();
+        const d = localNow.getUTCDate();
+        const startOfDay = new Date(Date.UTC(y, m, d, 0, 0, 0, 0) + tzOffsetMs);
         query.createdAt = { $gte: startOfDay };
       } else if (period === 'week') {
         const startOfWeek = new Date(now);
@@ -811,7 +851,10 @@ exports.getBills = async (req, res) => {
         startOfWeek.setHours(0, 0, 0, 0);
         query.createdAt = { $gte: startOfWeek };
       } else if (period === 'month') {
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const localNow = new Date(now.getTime() - tzOffsetMs);
+        const y = localNow.getUTCFullYear();
+        const m = localNow.getUTCMonth();
+        const startOfMonth = new Date(Date.UTC(y, m, 1, 0, 0, 0, 0) + tzOffsetMs);
         query.createdAt = { $gte: startOfMonth };
       }
     }

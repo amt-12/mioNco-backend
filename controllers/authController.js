@@ -115,15 +115,98 @@ exports.login = async (req, res, next) => {
             return res.status(403).json({ success: false, message: 'Your account is disabled or pending activation.' });
         }
 
-        // If password is provided, verify it; otherwise allow single-field Employee ID login
-        if (password && password.trim()) {
+        const normalizedRole = String(user.role || '').toLowerCase().replace(/[\s_-]+/g, '');
+        const isSuperAdmin = normalizedRole === 'superadmin' || normalizedRole === 'super_admin' || normalizedRole === 'admin';
+
+        // Superadmin MUST provide and verify password!
+        if (isSuperAdmin) {
+            if (!password || !password.trim()) {
+                return res.status(401).json({ 
+                    success: false, 
+                    requiresPassword: true, 
+                    role: user.role, 
+                    message: 'Password is required for Superadmin access.' 
+                });
+            }
             const isMatch = await user.matchPassword(password.trim());
             if (!isMatch) {
-                return res.status(401).json({ success: false, message: 'Invalid password.' });
+                return res.status(401).json({ 
+                    success: false, 
+                    requiresPassword: true, 
+                    role: user.role, 
+                    message: 'Invalid Superadmin password. Please try again.' 
+                });
+            }
+        } else {
+            // Other staff: allow single-field Employee ID login
+            // If password was passed, verify it if present
+            if (password && password.trim()) {
+                const isMatch = await user.matchPassword(password.trim());
+                if (!isMatch) {
+                    return res.status(401).json({ success: false, message: 'Invalid password.' });
+                }
             }
         }
 
         sendTokenResponse(user, 200, res);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// @desc    Check Employee ID role and whether password is required
+// @route   POST /api/v1/auth/check-identifier
+// @access  Public
+exports.checkIdentifier = async (req, res, next) => {
+    try {
+        const { identifier, employeeId, email, username } = req.body;
+        const loginInput = (identifier || employeeId || email || username || '').trim();
+
+        if (!loginInput) {
+            return res.status(400).json({ success: false, message: 'Please provide your Employee ID.' });
+        }
+
+        const escaped = loginInput.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+        const loginRegex = new RegExp(`^${escaped}$`, 'i');
+
+        let user = await User.findOne({
+            $or: [
+                { employeeId: loginRegex },
+                { employeeId: new RegExp(`${escaped}$`, 'i') },
+                { email: loginRegex },
+                { name: loginRegex }
+            ]
+        });
+
+        if (!user) {
+            const EmployeeProfile = require('../models/EmployeeProfile');
+            const emp = await EmployeeProfile.findOne({
+                $or: [
+                    { employeeId: loginRegex },
+                    { employeeId: new RegExp(`${escaped}$`, 'i') },
+                    { email: loginRegex }
+                ]
+            });
+            if (emp && emp.userAccount) {
+                user = await User.findById(emp.userAccount);
+            }
+        }
+
+        if (!user) {
+            return res.status(404).json({ success: false, exists: false, message: `No active staff member found with Employee ID "${loginInput}".` });
+        }
+
+        const normalizedRole = String(user.role || '').toLowerCase().replace(/[\s_-]+/g, '');
+        const isSuperAdmin = normalizedRole === 'superadmin' || normalizedRole === 'super_admin' || normalizedRole === 'admin';
+
+        return res.status(200).json({
+            success: true,
+            exists: true,
+            requiresPassword: isSuperAdmin,
+            role: user.role,
+            name: user.name,
+            employeeId: user.employeeId || loginInput
+        });
     } catch (error) {
         next(error);
     }
