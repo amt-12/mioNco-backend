@@ -10,6 +10,10 @@ const businessDaySchema = new mongoose.Schema({
     enum: ['Open', 'Closed'],
     default: 'Open'
   },
+  businessDate: {
+    type: String,
+    index: true
+  },
   startTime: {
     type: Date,
     default: Date.now

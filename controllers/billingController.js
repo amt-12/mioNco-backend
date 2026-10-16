@@ -9,6 +9,7 @@ const Table = require('../models/Table');
 const FoodSpoilage = require('../models/FoodSpoilage');
 const AuditLog = require('../models/AuditLog');
 const Floor = require('../models/Floor');
+const BusinessDay = require('../models/BusinessDay');
 
 // Helper to determine Floor Prefix for Bill Number (e.g. BIS- for Bistro)
 const resolveFloorPrefix = async (floorHint) => {
@@ -806,6 +807,8 @@ exports.getBills = async (req, res) => {
       : -330;
     const tzOffsetMs = tzOffsetMinutes * 60 * 1000;
 
+    const andConditions = [];
+
     if (startDate && endDate) {
       const sParts = String(startDate).split('-');
       const eParts = String(endDate).split('-');
@@ -821,7 +824,22 @@ exports.getBills = async (req, res) => {
         eDate = new Date(endDate);
         eDate.setHours(23, 59, 59, 999);
       }
-      query.createdAt = { $gte: sDate, $lte: eDate };
+
+      const matchingBusinessDays = await BusinessDay.find({
+        $or: [
+          { businessDate: { $gte: startDate, $lte: endDate } },
+          { startTime: { $gte: sDate, $lte: eDate } }
+        ]
+      });
+      const dayIds = matchingBusinessDays.map(b => b._id);
+
+      andConditions.push({
+        $or: [
+          { businessDate: { $gte: startDate, $lte: endDate } },
+          ...(dayIds.length > 0 ? [{ businessDay: { $in: dayIds } }] : []),
+          { businessDate: { $exists: false }, createdAt: { $gte: sDate, $lte: eDate } }
+        ]
+      });
     } else if (date) {
       const parts = String(date).split('-');
       let sDate, eDate;
@@ -835,35 +853,74 @@ exports.getBills = async (req, res) => {
         eDate = new Date(date);
         eDate.setHours(23, 59, 59, 999);
       }
-      query.createdAt = { $gte: sDate, $lte: eDate };
+
+      const matchingBusinessDays = await BusinessDay.find({
+        $or: [
+          { businessDate: date },
+          { startTime: { $gte: sDate, $lte: eDate } }
+        ]
+      });
+      const dayIds = matchingBusinessDays.map(b => b._id);
+
+      andConditions.push({
+        $or: [
+          { businessDate: date },
+          ...(dayIds.length > 0 ? [{ businessDay: { $in: dayIds } }] : []),
+          { businessDate: { $exists: false }, createdAt: { $gte: sDate, $lte: eDate } }
+        ]
+      });
     } else if (period) {
       const now = new Date();
       if (period === 'today') {
+        const activeDay = await BusinessDay.findOne({ status: 'Open' }).sort({ createdAt: -1 });
         const localNow = new Date(now.getTime() - tzOffsetMs);
         const y = localNow.getUTCFullYear();
         const m = localNow.getUTCMonth();
         const d = localNow.getUTCDate();
+        const todayDateStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
         const startOfDay = new Date(Date.UTC(y, m, d, 0, 0, 0, 0) + tzOffsetMs);
-        query.createdAt = { $gte: startOfDay };
+
+        if (activeDay) {
+          andConditions.push({
+            $or: [
+              { businessDay: activeDay._id },
+              { businessDate: activeDay.businessDate },
+              { businessDate: { $exists: false }, createdAt: { $gte: activeDay.startTime } }
+            ]
+          });
+        } else {
+          andConditions.push({
+            $or: [
+              { businessDate: todayDateStr },
+              { businessDate: { $exists: false }, createdAt: { $gte: startOfDay } }
+            ]
+          });
+        }
       } else if (period === 'week') {
         const startOfWeek = new Date(now);
         startOfWeek.setDate(now.getDate() - now.getDay());
         startOfWeek.setHours(0, 0, 0, 0);
-        query.createdAt = { $gte: startOfWeek };
+        andConditions.push({ createdAt: { $gte: startOfWeek } });
       } else if (period === 'month') {
         const localNow = new Date(now.getTime() - tzOffsetMs);
         const y = localNow.getUTCFullYear();
         const m = localNow.getUTCMonth();
         const startOfMonth = new Date(Date.UTC(y, m, 1, 0, 0, 0, 0) + tzOffsetMs);
-        query.createdAt = { $gte: startOfMonth };
+        andConditions.push({ createdAt: { $gte: startOfMonth } });
       }
     }
 
     if (givenBy) {
-      query.$or = [
-        { discountGivenBy: { $regex: givenBy, $options: 'i' } },
-        { ncStaffRemark: { $regex: givenBy, $options: 'i' } }
-      ];
+      andConditions.push({
+        $or: [
+          { discountGivenBy: { $regex: givenBy, $options: 'i' } },
+          { ncStaffRemark: { $regex: givenBy, $options: 'i' } }
+        ]
+      });
+    }
+
+    if (andConditions.length > 0) {
+      query.$and = andConditions;
     }
 
     if (search) {
@@ -2579,15 +2636,70 @@ exports.getDailySalesReport = async (req, res) => {
       end = new Date(Date.UTC(todayY, todayM - 1, todayD, 23, 59, 59, 999) + tzOffsetMs);
     }
 
+    // Find matching BusinessDay shifts for the requested date or range
+    let targetDayIds = [];
+    let shiftWindowStart = start;
+    let shiftWindowEnd = end;
+
+    const BusinessDay = require('../models/BusinessDay');
+    let bDayQuery;
+    if (startDate && endDate) {
+      bDayQuery = {
+        $or: [
+          { businessDate: { $gte: startDate, $lte: endDate } },
+          { startTime: { $gte: start, $lte: end } }
+        ]
+      };
+    } else {
+      const targetDate = date || todayDateStr;
+      bDayQuery = {
+        $or: [
+          { businessDate: targetDate },
+          { startTime: { $gte: start, $lte: end } }
+        ]
+      };
+    }
+
+    const targetBusinessDays = await BusinessDay.find(bDayQuery);
+    if (targetBusinessDays.length > 0) {
+      targetDayIds = targetBusinessDays.map(b => b._id);
+      // Expand window to encompass actual start and end of the shift (e.g. shift started 13 Oct morning and ended 14 Oct morning)
+      targetBusinessDays.forEach(b => {
+        if (b.startTime && b.startTime < shiftWindowStart) {
+          shiftWindowStart = b.startTime;
+        }
+        const bEnd = b.endTime || (b.status === 'Open' ? new Date() : b.updatedAt);
+        if (bEnd && bEnd > shiftWindowEnd) {
+          shiftWindowEnd = bEnd;
+        }
+      });
+    }
+
+    // Target date matching criteria
+    const targetDateCriteria = startDate && endDate
+      ? { businessDate: { $gte: startDate, $lte: endDate } }
+      : { businessDate: (date || todayDateStr) };
+
     const dateFilter = {
-      createdAt: { $gte: start, $lte: end }
+      $or: [
+        targetDateCriteria,
+        ...(targetDayIds.length > 0 ? [{ businessDay: { $in: targetDayIds } }] : []),
+        { businessDate: { $exists: false }, createdAt: { $gte: shiftWindowStart, $lte: shiftWindowEnd } }
+      ]
     };
 
-    // Fetch All Orders placed for the day (Running Sales of the Day)
+    // Fetch All Orders placed for the business day (Running Sales of the Day)
     const orders = await Order.find({
       $or: [
-        { createdAt: { $gte: start, $lte: end } },
-        { 'paymentDetails.paidAt': { $gte: start, $lte: end } }
+        targetDateCriteria,
+        ...(targetDayIds.length > 0 ? [{ businessDay: { $in: targetDayIds } }] : []),
+        {
+          businessDate: { $exists: false },
+          $or: [
+            { createdAt: { $gte: shiftWindowStart, $lte: shiftWindowEnd } },
+            { 'paymentDetails.paidAt': { $gte: shiftWindowStart, $lte: shiftWindowEnd } }
+          ]
+        }
       ]
     })
       .populate('table')
@@ -2597,13 +2709,20 @@ exports.getDailySalesReport = async (req, res) => {
     const orderIds = orders.map(o => o._id);
     const orderBillIds = orders.filter(o => o.bill).map(o => o.bill);
 
-    // Fetch All Bills for the day (strictly matching date window or referencing today's orders)
+    // Fetch All Bills for the business day
     const bills = await Bill.find({
       $or: [
-        { createdAt: { $gte: start, $lte: end } },
-        { 'payments.paidAt': { $gte: start, $lte: end } },
+        targetDateCriteria,
+        ...(targetDayIds.length > 0 ? [{ businessDay: { $in: targetDayIds } }] : []),
         { orders: { $in: orderIds } },
-        { _id: { $in: orderBillIds } }
+        { _id: { $in: orderBillIds } },
+        {
+          businessDate: { $exists: false },
+          $or: [
+            { createdAt: { $gte: shiftWindowStart, $lte: shiftWindowEnd } },
+            { 'payments.paidAt': { $gte: shiftWindowStart, $lte: shiftWindowEnd } }
+          ]
+        }
       ]
     })
       .populate('table')
@@ -2613,11 +2732,13 @@ exports.getDailySalesReport = async (req, res) => {
       .populate('session', 'sessionId guests pax')
       .sort({ createdAt: -1 });
 
-    // Fetch Spoilage Records strictly within the day's date window
+    // Fetch Spoilage Records strictly within the day's operating window
     let spoilages = await FoodSpoilage.find(dateFilter).sort({ createdAt: -1 });
 
-    // Fetch Audit Logs for edits, voids, cancellations, discounts, SC removal strictly within the day's date window
-    const auditLogs = await AuditLog.find(dateFilter)
+    // Fetch Audit Logs within the operating window
+    const auditLogs = await AuditLog.find({
+      createdAt: { $gte: shiftWindowStart, $lte: shiftWindowEnd }
+    })
       .populate('employeeId', 'name role')
       .sort({ createdAt: -1 });
 
@@ -2711,6 +2832,7 @@ exports.getDailySalesReport = async (req, res) => {
         orderId: ord.orderId,
         billNumber: unpaidBill?.billNumber || null,
         tableName: ord.table?.tableNumber ? `Table ${ord.table.tableNumber}` : (ord.table?.name || 'Dine-In'),
+        businessDate: ord.businessDate || (ord.createdAt ? ord.createdAt.toISOString().split('T')[0] : null),
         source: ord.source || 'Waiter',
         status: ord.status,
         paymentStatus: 'Unpaid',
@@ -3208,6 +3330,7 @@ exports.getDailySalesReport = async (req, res) => {
           _id: b._id,
           billNumber: b.billNumber,
           tableName: b.table?.tableNumber ? `Table ${b.table.tableNumber}` : (b.table?.name || 'Takeaway/Walk-in'),
+          businessDate: b.businessDate || (b.createdAt ? b.createdAt.toISOString().split('T')[0] : null),
           subtotal: b.subtotal || 0,
           netSale: bNet,
           grossSale: bGross,

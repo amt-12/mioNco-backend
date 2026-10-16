@@ -21,7 +21,7 @@ exports.getActiveBusinessDay = async (req, res) => {
 // @route POST /api/v1/business-day/start
 exports.startBusinessDay = async (req, res) => {
   try {
-    const { openingFloat, openingNotes } = req.body;
+    const { openingFloat, openingNotes, businessDate, timezoneOffset } = req.body;
     
     // Check if a business day is already open
     const existingOpen = await BusinessDay.findOne({ status: 'Open' });
@@ -35,10 +35,24 @@ exports.startBusinessDay = async (req, res) => {
     const lastDay = await BusinessDay.findOne().sort({ dayNumber: -1 });
     const nextDayNumber = lastDay ? (lastDay.dayNumber || 0) + 1 : 1;
 
+    // Timezone offset in minutes (e.g. -330 for UTC+05:30 IST)
+    const tzOffsetMinutes = timezoneOffset !== undefined && !isNaN(Number(timezoneOffset)) 
+      ? Number(timezoneOffset) 
+      : -330;
+    const tzOffsetMs = tzOffsetMinutes * 60 * 1000;
+
+    const now = new Date();
+    const localNow = new Date(now.getTime() - tzOffsetMs);
+    const y = localNow.getUTCFullYear();
+    const m = String(localNow.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(localNow.getUTCDate()).padStart(2, '0');
+    const computedBusinessDate = businessDate || `${y}-${m}-${d}`;
+
     const newDay = await BusinessDay.create({
       dayNumber: nextDayNumber,
       status: 'Open',
-      startTime: new Date(),
+      businessDate: computedBusinessDate,
+      startTime: now,
       startedBy: req.user?._id || req.user?.id,
       startedByName: req.user?.name || 'Admin',
       openingFloat: Number(openingFloat) || 0,
@@ -232,6 +246,8 @@ exports.getCurrentDaySummary = async (req, res) => {
 
     const orders = await Order.find({
       $or: [
+        { businessDay: activeDay._id },
+        { businessDate: activeDay.businessDate },
         { createdAt: { $gte: shiftStart } },
         { 'paymentDetails.paidAt': { $gte: shiftStart } },
         { updatedAt: { $gte: shiftStart }, paymentStatus: 'Paid' }
@@ -241,6 +257,8 @@ exports.getCurrentDaySummary = async (req, res) => {
 
     const bills = await Bill.find({
       $or: [
+        { businessDay: activeDay._id },
+        { businessDate: activeDay.businessDate },
         { createdAt: { $gte: shiftStart } },
         { updatedAt: { $gte: shiftStart } },
         { 'payments.timestamp': { $gte: shiftStart } }
@@ -251,6 +269,8 @@ exports.getCurrentDaySummary = async (req, res) => {
     try {
       spoilages = await FoodSpoilage.find({
         $or: [
+          { businessDay: activeDay._id },
+          { businessDate: activeDay.businessDate },
           { createdAt: { $gte: shiftStart } },
           { updatedAt: { $gte: shiftStart } }
         ]
@@ -289,20 +309,74 @@ exports.endBusinessDay = async (req, res) => {
     const shiftStart = activeDay.startTime;
     const endTime = new Date();
 
+    // Lock all bills, orders, and spoilages from this shift to this businessDay & businessDate
+    await Bill.updateMany(
+      {
+        $or: [
+          { businessDay: activeDay._id },
+          { businessDate: activeDay.businessDate },
+          { createdAt: { $gte: shiftStart, $lte: endTime } },
+          { 'payments.timestamp': { $gte: shiftStart, $lte: endTime } }
+        ]
+      },
+      {
+        $set: {
+          businessDay: activeDay._id,
+          businessDate: activeDay.businessDate
+        }
+      }
+    );
+
+    await Order.updateMany(
+      {
+        $or: [
+          { businessDay: activeDay._id },
+          { businessDate: activeDay.businessDate },
+          { createdAt: { $gte: shiftStart, $lte: endTime } }
+        ]
+      },
+      {
+        $set: {
+          businessDay: activeDay._id,
+          businessDate: activeDay.businessDate
+        }
+      }
+    );
+
+    await FoodSpoilage.updateMany(
+      {
+        $or: [
+          { businessDay: activeDay._id },
+          { businessDate: activeDay.businessDate },
+          { createdAt: { $gte: shiftStart, $lte: endTime } }
+        ]
+      },
+      {
+        $set: {
+          businessDay: activeDay._id,
+          businessDate: activeDay.businessDate
+        }
+      }
+    );
+
     const orders = await Order.find({
       $or: [
-        { createdAt: { $gte: shiftStart } },
-        { 'paymentDetails.paidAt': { $gte: shiftStart } },
-        { updatedAt: { $gte: shiftStart }, paymentStatus: 'Paid' }
+        { businessDay: activeDay._id },
+        { businessDate: activeDay.businessDate },
+        { createdAt: { $gte: shiftStart, $lte: endTime } },
+        { 'paymentDetails.paidAt': { $gte: shiftStart, $lte: endTime } },
+        { updatedAt: { $gte: shiftStart, $lte: endTime }, paymentStatus: 'Paid' }
       ],
       status: { $ne: 'Cancelled' }
     });
 
     const bills = await Bill.find({
       $or: [
-        { createdAt: { $gte: shiftStart } },
-        { updatedAt: { $gte: shiftStart } },
-        { 'payments.timestamp': { $gte: shiftStart } }
+        { businessDay: activeDay._id },
+        { businessDate: activeDay.businessDate },
+        { createdAt: { $gte: shiftStart, $lte: endTime } },
+        { updatedAt: { $gte: shiftStart, $lte: endTime } },
+        { 'payments.timestamp': { $gte: shiftStart, $lte: endTime } }
       ]
     });
     
@@ -310,8 +384,10 @@ exports.endBusinessDay = async (req, res) => {
     try {
       spoilages = await FoodSpoilage.find({
         $or: [
-          { createdAt: { $gte: shiftStart } },
-          { updatedAt: { $gte: shiftStart } }
+          { businessDay: activeDay._id },
+          { businessDate: activeDay.businessDate },
+          { createdAt: { $gte: shiftStart, $lte: endTime } },
+          { updatedAt: { $gte: shiftStart, $lte: endTime } }
         ]
       });
     } catch (e) {

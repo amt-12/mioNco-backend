@@ -166,6 +166,15 @@ const billSchema = new mongoose.Schema({
   },
   
   createdBy: { type: mongoose.Schema.ObjectId, ref: 'User' },
+  businessDay: {
+    type: mongoose.Schema.ObjectId,
+    ref: 'BusinessDay',
+    index: true
+  },
+  businessDate: {
+    type: String,
+    index: true
+  },
   transferredFromTable: {
     tableId: { type: mongoose.Schema.ObjectId, ref: 'Table' },
     tableNumber: String,
@@ -178,6 +187,55 @@ const billSchema = new mongoose.Schema({
   notes: String
 }, {
   timestamps: true
+});
+
+billSchema.pre('save', async function (next) {
+  if (!this.businessDate) {
+    try {
+      // 1. Inherit from linked orders if available
+      if (Array.isArray(this.orders) && this.orders.length > 0) {
+        const Order = mongoose.model('Order');
+        const linkedOrder = await Order.findOne({ _id: { $in: this.orders }, businessDate: { $exists: true, $ne: null } });
+        if (linkedOrder && linkedOrder.businessDate) {
+          this.businessDate = linkedOrder.businessDate;
+          if (linkedOrder.businessDay && !this.businessDay) {
+            this.businessDay = linkedOrder.businessDay;
+          }
+        }
+      }
+
+      // 2. Check currently active Open BusinessDay shift
+      if (!this.businessDate) {
+        const BusinessDay = mongoose.model('BusinessDay');
+        const activeDay = await BusinessDay.findOne({ status: 'Open' }).sort({ createdAt: -1 });
+        if (activeDay) {
+          this.businessDay = activeDay._id;
+          let bDate = activeDay.businessDate;
+          if (!bDate && activeDay.startTime) {
+            const tzOffsetMs = -330 * 60 * 1000;
+            const localStart = new Date(activeDay.startTime.getTime() - tzOffsetMs);
+            const y = localStart.getUTCFullYear();
+            const m = String(localStart.getUTCMonth() + 1).padStart(2, '0');
+            const d = String(localStart.getUTCDate()).padStart(2, '0');
+            bDate = `${y}-${m}-${d}`;
+          }
+          this.businessDate = bDate;
+        } else {
+          // Fallback to local IST date of creation
+          const tzOffsetMs = -330 * 60 * 1000;
+          const refTime = this.createdAt ? new Date(this.createdAt) : new Date();
+          const localDate = new Date(refTime.getTime() - tzOffsetMs);
+          const y = localDate.getUTCFullYear();
+          const m = String(localDate.getUTCMonth() + 1).padStart(2, '0');
+          const d = String(localDate.getUTCDate()).padStart(2, '0');
+          this.businessDate = `${y}-${m}-${d}`;
+        }
+      }
+    } catch (err) {
+      console.error('Error in Bill pre-save businessDate hook:', err);
+    }
+  }
+  next();
 });
 
 module.exports = mongoose.model('Bill', billSchema);
