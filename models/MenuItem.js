@@ -22,6 +22,7 @@ const MenuItemSchema = new mongoose.Schema({
   displayName: String,
   sku: { type: String, unique: true },
   internalCode: String,
+  itemType: { type: String, enum: ['Food', 'Liquor'], default: 'Food' },
   categories: [{ 
     type: String, 
     enum: [
@@ -77,6 +78,8 @@ const MenuItemSchema = new mongoose.Schema({
   
   // Pricing
   basePrice: { type: Number },
+  sellingPrice: { type: Number },
+  bottlePrice: { type: Number },
   discountedPrice: Number,
   taxInclusive: { type: Boolean, default: false },
   taxType: { type: String, enum: ['Inherit', 'GST', 'VAT', 'Exempt'], default: 'Inherit' },

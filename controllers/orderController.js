@@ -240,13 +240,21 @@ exports.createOrder = async (req, res) => {
             const totalPrice = unitPrice * quantity;
             addedSubtotal += totalPrice;
 
-            const itemTax = (totalPrice * defaultGST) / 100;
+            const isLiquorItem = item.itemType === 'Liquor' || menuItemDoc?.itemType === 'Liquor' || menuItemDoc?.taxType === 'VAT';
+            const itemType = isLiquorItem ? 'Liquor' : 'Food';
+            const taxType = isLiquorItem ? 'VAT' : (item.taxType || menuItemDoc?.taxType || 'GST');
+            const taxRate = isLiquorItem ? defaultVAT : (item.taxRate ?? menuItemDoc?.taxRate ?? defaultGST);
+
+            const itemTax = (totalPrice * taxRate) / 100;
             addedTax += itemTax;
             
             return {
                 menuItem: mId || item.menuItem,
                 isOnRequest: false,
                 foodName: menuItemDoc?.foodName || menuItemDoc?.displayName || item.foodName || 'Item',
+                itemType,
+                taxType,
+                taxRate,
                 variant: item.variant,
                 customizations: item.customizations,
                 quantity,

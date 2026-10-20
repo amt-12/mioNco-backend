@@ -214,6 +214,12 @@ exports.createItem = async (req, res) => {
     for (let item of itemsData) {
       item.sku = 'SKU-' + Math.floor(Math.random() * 1000000).toString();
       item.createdBy = req.user ? req.user._id : null;
+      if (item.itemType === 'Liquor') {
+        item.taxType = 'VAT';
+        item.taxRate = 18.90;
+        if (!item.basePrice && item.sellingPrice) item.basePrice = item.sellingPrice;
+        if (!item.sellingPrice && item.basePrice) item.sellingPrice = item.basePrice;
+      }
     }
     
     const items = await MenuItem.insertMany(itemsData);
@@ -234,6 +240,13 @@ exports.updateItem = async (req, res) => {
     const oldItem = await MenuItem.findById(req.params.id);
     if (!oldItem) return res.status(404).json({ success: false, message: 'Item not found' });
     
+    if (req.body.itemType === 'Liquor') {
+      req.body.taxType = 'VAT';
+      req.body.taxRate = 18.90;
+      if (!req.body.basePrice && req.body.sellingPrice) req.body.basePrice = req.body.sellingPrice;
+      if (!req.body.sellingPrice && req.body.basePrice) req.body.sellingPrice = req.body.basePrice;
+    }
+
     const item = await MenuItem.findByIdAndUpdate(req.params.id, req.body, {
       new: true, runValidators: true
     });

@@ -180,9 +180,14 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     let taxType = 'GST';
     let taxRate = globalGstRate;
 
+    const isLiquorItem = item.itemType === 'Liquor' || menuItemDoc?.itemType === 'Liquor' || menuItemDoc?.taxType === 'VAT';
+
     if (item.isOnRequest) {
       taxType = item.taxType || (item.itemType === 'Liquor' ? 'VAT' : 'GST');
       taxRate = item.taxRate ?? (taxType === 'VAT' ? globalVatRate : globalGstRate);
+    } else if (isLiquorItem) {
+      taxType = 'VAT';
+      taxRate = item.taxRate ?? menuItemDoc?.taxRate ?? globalVatRate;
     } else if (menuItemDoc) {
       if (menuItemDoc.taxType && menuItemDoc.taxType !== 'Inherit') {
         taxType = menuItemDoc.taxType;
