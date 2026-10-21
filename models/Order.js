@@ -20,8 +20,14 @@ const orderItemSchema = new mongoose.Schema({
     },
     taxType: {
         type: String,
-        enum: ['GST', 'VAT'],
-        default: 'GST'
+        enum: ['GST', 'VAT', 'Exempt'],
+        default: 'GST',
+        set: function(val) {
+            if (val === 'Inherit' || !val) {
+                return (this && this.itemType === 'Liquor') ? 'VAT' : 'GST';
+            }
+            return val;
+        }
     },
     taxRate: {
         type: Number

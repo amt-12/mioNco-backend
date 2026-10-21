@@ -5,6 +5,7 @@ const ServiceRequest = require('../models/ServiceRequest');
 const Table = require('../models/Table');
 const AuditLog = require('../models/AuditLog');
 const RestaurantSettings = require('../models/RestaurantSettings');
+const MenuCategory = require('../models/MenuCategory');
 
 // Utility to generate IDs
 const generateId = async (prefix, model) => {
@@ -183,8 +184,11 @@ exports.createOrder = async (req, res) => {
             if (item.isOnRequest) {
                 const foodName = item.foodName || item.name || 'On-Request Item';
                 const itemType = item.itemType === 'Liquor' ? 'Liquor' : 'Food';
-                const taxType = item.taxType || (itemType === 'Liquor' ? 'VAT' : 'GST');
-                const taxRate = taxType === 'VAT' ? defaultVAT : defaultGST;
+                let taxType = (item.taxType && item.taxType !== 'Inherit') ? item.taxType : (itemType === 'Liquor' ? 'VAT' : 'GST');
+                if (!['GST', 'VAT', 'Exempt'].includes(taxType)) {
+                    taxType = itemType === 'Liquor' ? 'VAT' : 'GST';
+                }
+                const taxRate = item.taxRate ?? (taxType === 'VAT' ? defaultVAT : (taxType === 'Exempt' ? 0 : defaultGST));
                 const unitPrice = Number(item.unitPrice ?? item.price ?? 0);
                 const quantity = Number(item.quantity || 1);
                 const totalPrice = unitPrice * quantity;
@@ -242,8 +246,51 @@ exports.createOrder = async (req, res) => {
 
             const isLiquorItem = item.itemType === 'Liquor' || menuItemDoc?.itemType === 'Liquor' || menuItemDoc?.taxType === 'VAT';
             const itemType = isLiquorItem ? 'Liquor' : 'Food';
-            const taxType = isLiquorItem ? 'VAT' : (item.taxType || menuItemDoc?.taxType || 'GST');
-            const taxRate = isLiquorItem ? defaultVAT : (item.taxRate ?? menuItemDoc?.taxRate ?? defaultGST);
+            
+            let taxType = 'GST';
+            let taxRate = defaultGST;
+
+            if (isLiquorItem) {
+                taxType = 'VAT';
+                taxRate = item.taxRate ?? menuItemDoc?.taxRate ?? defaultVAT;
+            } else if (item.taxType && item.taxType !== 'Inherit') {
+                taxType = item.taxType;
+                taxRate = item.taxRate ?? (taxType === 'VAT' ? defaultVAT : (taxType === 'Exempt' ? 0 : defaultGST));
+            } else if (menuItemDoc) {
+                if (menuItemDoc.taxType && menuItemDoc.taxType !== 'Inherit') {
+                    taxType = menuItemDoc.taxType;
+                    taxRate = menuItemDoc.taxRate ?? (taxType === 'VAT' ? defaultVAT : (taxType === 'Exempt' ? 0 : defaultGST));
+                } else {
+                    // Fallback to Category when MenuItem taxType is Inherit
+                    let categoryDoc = null;
+                    if (menuItemDoc.dishType) {
+                        categoryDoc = await MenuCategory.findOne({ name: menuItemDoc.dishType });
+                    }
+                    if (!categoryDoc && menuItemDoc.section) {
+                        categoryDoc = await MenuCategory.findById(menuItemDoc.section);
+                    }
+                    if (categoryDoc && categoryDoc.taxType) {
+                        taxType = categoryDoc.taxType;
+                        taxRate = categoryDoc.taxRate ?? (taxType === 'VAT' ? defaultVAT : (taxType === 'Exempt' ? 0 : defaultGST));
+                    } else {
+                        // Rule based default: if dishType or cuisine indicates Liquor / Alcohol / Beverage -> VAT
+                        const nameLower = ((menuItemDoc.foodName || item.foodName || '') + ' ' + (menuItemDoc.dishType || '')).toLowerCase();
+                        if (nameLower.includes('liquor') || nameLower.includes('cocktail') || nameLower.includes('whiskey') || nameLower.includes('wine') || nameLower.includes('beer') || nameLower.includes('alcohol') || nameLower.includes('spirits')) {
+                            taxType = 'VAT';
+                            taxRate = defaultVAT;
+                        } else {
+                            taxType = 'GST';
+                            taxRate = defaultGST;
+                        }
+                    }
+                }
+            }
+
+            // Safety guard: Ensure taxType is never 'Inherit' and strictly valid enum
+            if (!['GST', 'VAT', 'Exempt'].includes(taxType)) {
+                taxType = isLiquorItem ? 'VAT' : 'GST';
+                taxRate = taxType === 'VAT' ? defaultVAT : defaultGST;
+            }
 
             const itemTax = (totalPrice * taxRate) / 100;
             addedTax += itemTax;
@@ -296,6 +343,9 @@ exports.createOrder = async (req, res) => {
                         }
                     } catch (e) {}
                 }
+                if (i.taxType === 'Inherit' || !['GST', 'VAT', 'Exempt'].includes(i.taxType)) {
+                    i.taxType = i.itemType === 'Liquor' ? 'VAT' : 'GST';
+                }
             }
 
             let subtotal = 0;
@@ -303,7 +353,7 @@ exports.createOrder = async (req, res) => {
             existingOrder.items.forEach(i => {
                 const itemTotal = i.totalPrice || (i.unitPrice * i.quantity) || 0;
                 subtotal += itemTotal;
-                const rate = i.taxRate || (i.itemType === 'Liquor' ? defaultVAT : defaultGST);
+                const rate = i.taxRate ?? (i.taxType === 'VAT' || i.itemType === 'Liquor' ? defaultVAT : (i.taxType === 'Exempt' ? 0 : defaultGST));
                 totalTax += (itemTotal * rate) / 100;
             });
 
