@@ -183,11 +183,11 @@ exports.createOrder = async (req, res) => {
         const processedItems = await Promise.all(items.map(async item => {
             if (item.isOnRequest) {
                 const foodName = item.foodName || item.name || 'On-Request Item';
-                const itemType = item.itemType === 'Liquor' ? 'Liquor' : 'Food';
-                let taxType = (item.taxType && item.taxType !== 'Inherit') ? item.taxType : (itemType === 'Liquor' ? 'VAT' : 'GST');
-                if (!['GST', 'VAT', 'Exempt'].includes(taxType)) {
-                    taxType = itemType === 'Liquor' ? 'VAT' : 'GST';
-                }
+                const nameLower = foodName.toLowerCase();
+                const isAlcoholName = /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider)\b/i.test(nameLower);
+                const isLiquor = item.itemType === 'Liquor' || (!item.itemType && (item.taxType === 'VAT' || isAlcoholName));
+                const itemType = isLiquor ? 'Liquor' : 'Food';
+                const taxType = isLiquor ? 'VAT' : (item.taxType === 'Exempt' ? 'Exempt' : 'GST');
                 const taxRate = item.taxRate ?? (taxType === 'VAT' ? defaultVAT : (taxType === 'Exempt' ? 0 : defaultGST));
                 const unitPrice = Number(item.unitPrice ?? item.price ?? 0);
                 const quantity = Number(item.quantity || 1);
@@ -244,7 +244,11 @@ exports.createOrder = async (req, res) => {
             const totalPrice = unitPrice * quantity;
             addedSubtotal += totalPrice;
 
-            const isLiquorItem = item.itemType === 'Liquor' || menuItemDoc?.itemType === 'Liquor' || menuItemDoc?.taxType === 'VAT';
+            const nameLower = ((menuItemDoc?.foodName || item.foodName || '') + ' ' + (menuItemDoc?.dishType || '')).toLowerCase();
+            const isAlcoholName = /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider)\b/i.test(nameLower);
+            const isExplicitLiquor = item.itemType === 'Liquor' || menuItemDoc?.itemType === 'Liquor';
+            const isExplicitFood = item.itemType === 'Food' || menuItemDoc?.itemType === 'Food';
+            const isLiquorItem = isExplicitLiquor || (!isExplicitFood && (menuItemDoc?.taxType === 'VAT' || item.taxType === 'VAT' || isAlcoholName));
             const itemType = isLiquorItem ? 'Liquor' : 'Food';
             
             let taxType = 'GST';
@@ -253,34 +257,23 @@ exports.createOrder = async (req, res) => {
             if (isLiquorItem) {
                 taxType = 'VAT';
                 taxRate = item.taxRate ?? menuItemDoc?.taxRate ?? defaultVAT;
-            } else if (item.taxType && item.taxType !== 'Inherit') {
-                taxType = item.taxType;
-                taxRate = item.taxRate ?? (taxType === 'VAT' ? defaultVAT : (taxType === 'Exempt' ? 0 : defaultGST));
-            } else if (menuItemDoc) {
-                if (menuItemDoc.taxType && menuItemDoc.taxType !== 'Inherit') {
-                    taxType = menuItemDoc.taxType;
-                    taxRate = menuItemDoc.taxRate ?? (taxType === 'VAT' ? defaultVAT : (taxType === 'Exempt' ? 0 : defaultGST));
-                } else {
-                    // Fallback to Category when MenuItem taxType is Inherit
-                    let categoryDoc = null;
-                    if (menuItemDoc.dishType) {
-                        categoryDoc = await MenuCategory.findOne({ name: menuItemDoc.dishType });
-                    }
-                    if (!categoryDoc && menuItemDoc.section) {
-                        categoryDoc = await MenuCategory.findById(menuItemDoc.section);
-                    }
-                    if (categoryDoc && categoryDoc.taxType) {
-                        taxType = categoryDoc.taxType;
-                        taxRate = categoryDoc.taxRate ?? (taxType === 'VAT' ? defaultVAT : (taxType === 'Exempt' ? 0 : defaultGST));
-                    } else {
-                        // Rule based default: if dishType or cuisine indicates Liquor / Alcohol / Beverage -> VAT
-                        const nameLower = ((menuItemDoc.foodName || item.foodName || '') + ' ' + (menuItemDoc.dishType || '')).toLowerCase();
-                        if (nameLower.includes('liquor') || nameLower.includes('cocktail') || nameLower.includes('whiskey') || nameLower.includes('wine') || nameLower.includes('beer') || nameLower.includes('alcohol') || nameLower.includes('spirits')) {
-                            taxType = 'VAT';
-                            taxRate = defaultVAT;
-                        } else {
+            } else {
+                // Strictly Food item: GST or Exempt only
+                taxType = 'GST';
+                taxRate = defaultGST;
+
+                if (menuItemDoc) {
+                    if (menuItemDoc.taxType && menuItemDoc.taxType !== 'Inherit' && menuItemDoc.taxType !== 'VAT') {
+                        taxType = menuItemDoc.taxType;
+                        taxRate = menuItemDoc.taxRate ?? (taxType === 'Exempt' ? 0 : defaultGST);
+                    } else if (menuItemDoc.dishType) {
+                        const categoryDoc = await MenuCategory.findOne({ name: menuItemDoc.dishType });
+                        if (categoryDoc && categoryDoc.taxType === 'Exempt') {
+                            taxType = 'Exempt';
+                            taxRate = 0;
+                        } else if (categoryDoc && categoryDoc.taxType === 'GST') {
                             taxType = 'GST';
-                            taxRate = defaultGST;
+                            taxRate = categoryDoc.taxRate ?? defaultGST;
                         }
                     }
                 }
@@ -343,7 +336,10 @@ exports.createOrder = async (req, res) => {
                         }
                     } catch (e) {}
                 }
-                if (i.taxType === 'Inherit' || !['GST', 'VAT', 'Exempt'].includes(i.taxType)) {
+                if (i.itemType === 'Food' && i.taxType === 'VAT') {
+                    i.taxType = 'GST';
+                    i.taxRate = defaultGST;
+                } else if (i.taxType === 'Inherit' || !['GST', 'VAT', 'Exempt'].includes(i.taxType)) {
                     i.taxType = i.itemType === 'Liquor' ? 'VAT' : 'GST';
                 }
             }
@@ -353,7 +349,8 @@ exports.createOrder = async (req, res) => {
             existingOrder.items.forEach(i => {
                 const itemTotal = i.totalPrice || (i.unitPrice * i.quantity) || 0;
                 subtotal += itemTotal;
-                const rate = i.taxRate ?? (i.taxType === 'VAT' || i.itemType === 'Liquor' ? defaultVAT : (i.taxType === 'Exempt' ? 0 : defaultGST));
+                const isLiq = i.itemType === 'Liquor' || (i.itemType !== 'Food' && i.taxType === 'VAT');
+                const rate = i.taxRate ?? (isLiq ? defaultVAT : (i.taxType === 'Exempt' ? 0 : defaultGST));
                 totalTax += (itemTotal * rate) / 100;
             });
 
@@ -694,6 +691,23 @@ exports.updateOrderStatus = async (req, res) => {
 
         await order.save();
 
+        if (status === 'Cancelled') {
+            try {
+                const Bill = require('../models/Bill');
+                const activeBill = await Bill.findOne({
+                    $or: [{ orders: order._id }, ...(order.table ? [{ table: order.table }] : [])],
+                    status: 'Active',
+                    'splitInfo.isSplit': { $ne: true }
+                });
+                if (activeBill) {
+                    const { syncBillWithOrders } = require('./billingController');
+                    await syncBillWithOrders(activeBill._id);
+                }
+            } catch (syncErr) {
+                console.error('Error auto-syncing bill on order cancel:', syncErr);
+            }
+        }
+
         const populatedOrder = await Order.findById(order._id)
             .populate('table')
             .populate('waiter', 'name')
@@ -741,8 +755,28 @@ exports.updateOrderItemStatus = async (req, res) => {
         if (!item) return res.status(404).json({ success: false, message: 'Item not found in order' });
 
         item.status = status;
-        if (status === 'Served') item.servedAt = new Date();
-        if (status === 'Cancelled') item.cancelledAt = new Date();
+        if (status === 'Cancelled' || status === 'Void' || status === 'Voided' || status === 'Rejected') {
+            item.cancelledAt = new Date();
+            const RestaurantSettings = require('../models/RestaurantSettings');
+            const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
+            const defaultGST = settings?.taxSettings?.defaultGSTPercent ?? 5;
+            const defaultVAT = settings?.taxSettings?.defaultVATPercent ?? 18.9;
+
+            let sub = 0;
+            let tax = 0;
+            order.items.forEach(i => {
+                if (i.status === 'Cancelled' || i.status === 'Void' || i.status === 'Voided' || i.status === 'Rejected' || i.isSpoiled) return;
+                const iTotal = i.totalPrice || (i.unitPrice * i.quantity) || 0;
+                sub += iTotal;
+                const isLiq = i.itemType === 'Liquor' || (i.itemType !== 'Food' && i.taxType === 'VAT');
+                const rate = i.taxRate ?? (isLiq ? defaultVAT : (i.taxType === 'Exempt' ? 0 : defaultGST));
+                tax += (iTotal * rate) / 100;
+            });
+            order.subtotal = Number(sub.toFixed(2));
+            order.subTotal = order.subtotal;
+            order.tax = Number(tax.toFixed(2));
+            order.total = Math.max(0, Math.round(sub + tax + (order.serviceCharge || 0) - (order.discount || 0)));
+        }
 
         // Check if all items are served, or ready, then update overall order status
         const allItemsServedOrCancelled = order.items.length > 0 && order.items.every(i => 
@@ -762,7 +796,11 @@ exports.updateOrderItemStatus = async (req, res) => {
         await order.save();
         try {
             const Bill = require('../models/Bill');
-            const activeBill = await Bill.findOne({ orders: order._id, status: 'Active', 'splitInfo.isSplit': { $ne: true } });
+            const activeBill = await Bill.findOne({
+                $or: [{ orders: order._id }, ...(order.table ? [{ table: order.table }] : [])],
+                status: 'Active',
+                'splitInfo.isSplit': { $ne: true }
+            });
             if (activeBill) {
                 const { syncBillWithOrders } = require('./billingController');
                 await syncBillWithOrders(activeBill._id);
@@ -869,14 +907,16 @@ exports.rejectItem = async (req, res) => {
             if (i.status !== 'Cancelled' && i.status !== 'Rejected' && i.status !== 'Void') {
                 const itemTotal = i.totalPrice || ((i.unitPrice || 0) * (i.quantity || 1)) || 0;
                 subtotal += itemTotal;
-                const rate = i.taxRate || (i.itemType === 'Liquor' ? defaultVAT : defaultGST);
+                const isLiq = i.itemType === 'Liquor' || (i.itemType !== 'Food' && i.taxType === 'VAT');
+                const rate = i.taxRate ?? (isLiq ? defaultVAT : (i.taxType === 'Exempt' ? 0 : defaultGST));
                 totalTax += (itemTotal * rate) / 100;
             }
         });
 
         order.subtotal = Number(subtotal.toFixed(2));
+        order.subTotal = order.subtotal;
         order.tax = Number(totalTax.toFixed(2));
-        order.total = Math.round(subtotal + totalTax);
+        order.total = Math.max(0, Math.round(subtotal + totalTax + (order.serviceCharge || 0) - (order.discount || 0)));
 
         // Check overall order status
         const activeItems = order.items.filter(i => i.status !== 'Cancelled' && i.status !== 'Rejected' && i.status !== 'Void');
@@ -890,6 +930,21 @@ exports.rejectItem = async (req, res) => {
         }
 
         await order.save();
+
+        try {
+            const Bill = require('../models/Bill');
+            const activeBill = await Bill.findOne({
+                $or: [{ orders: order._id }, ...(order.table ? [{ table: order.table }] : [])],
+                status: 'Active',
+                'splitInfo.isSplit': { $ne: true }
+            });
+            if (activeBill) {
+                const { syncBillWithOrders } = require('./billingController');
+                await syncBillWithOrders(activeBill._id);
+            }
+        } catch (syncErr) {
+            console.error('Error auto-syncing bill on item reject:', syncErr);
+        }
 
         const populatedOrder = await Order.findById(order._id)
             .populate('table')
@@ -1132,10 +1187,27 @@ exports.removeOrderItem = async (req, res) => {
         const removedItem = order.items.find(i => String(i._id) === String(itemId) || String(i.id) === String(itemId));
         order.items = order.items.filter(i => String(i._id) !== String(itemId) && String(i.id) !== String(itemId));
         
-        // Recalculate subtotal & total
-        order.subTotal = order.items.reduce((acc, i) => acc + (i.totalPrice || (i.quantity * (i.unitPrice || 0))), 0);
+        // Recalculate subtotal, tax & total
+        const RestaurantSettings = require('../models/RestaurantSettings');
+        const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
+        const defaultGST = settings?.taxSettings?.defaultGSTPercent ?? 5;
+        const defaultVAT = settings?.taxSettings?.defaultVATPercent ?? 18.9;
+
+        let sub = 0;
+        let tax = 0;
+        order.items.forEach(i => {
+            if (i.status === 'Cancelled' || i.status === 'Void' || i.status === 'Voided' || i.status === 'Rejected' || i.isSpoiled) return;
+            const iTotal = i.totalPrice || (i.unitPrice * i.quantity) || 0;
+            sub += iTotal;
+            const isLiq = i.itemType === 'Liquor' || (i.itemType !== 'Food' && i.taxType === 'VAT');
+            const rate = i.taxRate ?? (isLiq ? defaultVAT : (i.taxType === 'Exempt' ? 0 : defaultGST));
+            tax += (iTotal * rate) / 100;
+        });
+
+        order.subTotal = Number(sub.toFixed(2));
         order.subtotal = order.subTotal;
-        order.total = Math.max(0, order.subTotal + (order.tax || 0) + (order.serviceCharge || 0) - (order.discount || 0));
+        order.tax = Number(tax.toFixed(2));
+        order.total = Math.max(0, Math.round(sub + tax + (order.serviceCharge || 0) - (order.discount || 0)));
         
         // If all items removed, mark order as Cancelled
         if (order.items.length === 0) {
@@ -1145,7 +1217,11 @@ exports.removeOrderItem = async (req, res) => {
         await order.save();
         try {
             const Bill = require('../models/Bill');
-            const activeBill = await Bill.findOne({ orders: order._id, status: 'Active', 'splitInfo.isSplit': { $ne: true } });
+            const activeBill = await Bill.findOne({
+                $or: [{ orders: order._id }, ...(order.table ? [{ table: order.table }] : [])],
+                status: 'Active',
+                'splitInfo.isSplit': { $ne: true }
+            });
             if (activeBill) {
                 const { syncBillWithOrders } = require('./billingController');
                 await syncBillWithOrders(activeBill._id);
@@ -1200,8 +1276,44 @@ exports.addOrderItem = async (req, res) => {
             order.waiter = req.body.waiter;
         }
 
+        const RestaurantSettings = require('../models/RestaurantSettings');
+        const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
+        const defaultGST = settings?.taxSettings?.defaultGSTPercent ?? 5;
+        const defaultVAT = settings?.taxSettings?.defaultVATPercent ?? 18.9;
+
+        const nameLower = ((itemObj?.foodName || '') + ' ' + (itemObj?.dishType || '')).toLowerCase();
+        const isAlcoholName = /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider)\b/i.test(nameLower);
+        const isExplicitLiquor = itemObj?.itemType === 'Liquor';
+        const isExplicitFood = itemObj?.itemType === 'Food';
+        const isLiq = isExplicitLiquor || (!isExplicitFood && (itemObj?.taxType === 'VAT' || isAlcoholName));
+        const itemType = isLiq ? 'Liquor' : 'Food';
+
+        let taxType = isLiq ? 'VAT' : 'GST';
+        let taxRate = isLiq ? (itemObj?.taxRate ?? defaultVAT) : defaultGST;
+
+        if (!isLiq && itemObj) {
+            if (itemObj.taxType && itemObj.taxType !== 'Inherit' && itemObj.taxType !== 'VAT') {
+                taxType = itemObj.taxType;
+                taxRate = itemObj.taxRate ?? (taxType === 'Exempt' ? 0 : defaultGST);
+            } else if (itemObj.dishType) {
+                const MenuCategory = require('../models/MenuCategory');
+                const categoryDoc = await MenuCategory.findOne({ name: itemObj.dishType });
+                if (categoryDoc && categoryDoc.taxType === 'Exempt') {
+                    taxType = 'Exempt';
+                    taxRate = 0;
+                } else if (categoryDoc && categoryDoc.taxType === 'GST') {
+                    taxType = 'GST';
+                    taxRate = categoryDoc.taxRate ?? defaultGST;
+                }
+            }
+        }
+
         order.items.push({
             menuItem: menuItemId,
+            foodName: itemObj?.foodName || itemObj?.displayName || 'Item',
+            itemType,
+            taxType,
+            taxRate,
             quantity,
             unitPrice: price,
             totalPrice: quantity * price,
@@ -1210,13 +1322,30 @@ exports.addOrderItem = async (req, res) => {
             status: 'Pending'
         });
 
-        order.subTotal = order.items.reduce((acc, i) => acc + (i.totalPrice || (i.quantity * (i.unitPrice || 0))), 0);
-        order.total = Math.max(0, order.subTotal + (order.tax || 0) + (order.serviceCharge || 0) - (order.discount || 0));
+        let sub = 0;
+        let tax = 0;
+        order.items.forEach(i => {
+            if (i.status === 'Cancelled' || i.status === 'Void' || i.status === 'Voided' || i.status === 'Rejected' || i.isSpoiled) return;
+            const iTotal = i.totalPrice || (i.unitPrice * i.quantity) || 0;
+            sub += iTotal;
+            const isLiqItem = i.itemType === 'Liquor' || (i.itemType !== 'Food' && i.taxType === 'VAT');
+            const rate = i.taxRate ?? (isLiqItem ? defaultVAT : (i.taxType === 'Exempt' ? 0 : defaultGST));
+            tax += (iTotal * rate) / 100;
+        });
+
+        order.subTotal = Number(sub.toFixed(2));
+        order.subtotal = order.subTotal;
+        order.tax = Number(tax.toFixed(2));
+        order.total = Math.max(0, Math.round(sub + tax + (order.serviceCharge || 0) - (order.discount || 0)));
 
         await order.save();
         try {
             const Bill = require('../models/Bill');
-            const activeBill = await Bill.findOne({ orders: order._id, status: 'Active', 'splitInfo.isSplit': { $ne: true } });
+            const activeBill = await Bill.findOne({
+                $or: [{ orders: order._id }, ...(order.table ? [{ table: order.table }] : [])],
+                status: 'Active',
+                'splitInfo.isSplit': { $ne: true }
+            });
             if (activeBill) {
                 const { syncBillWithOrders } = require('./billingController');
                 await syncBillWithOrders(activeBill._id);

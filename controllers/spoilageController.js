@@ -164,17 +164,45 @@ exports.createSpoilage = async (req, res) => {
         if (updatedItem) {
           orderObj.markModified('items');
 
-          // Recalculate order subtotal and total excluding spoiled items
-          const activeItems = orderObj.items.filter(i => !i.isSpoiled);
-          const newSubtotal = activeItems.reduce((acc, i) => acc + (i.totalPrice || (i.unitPrice * i.quantity) || 0), 0);
-          orderObj.subtotal = newSubtotal;
-          orderObj.subTotal = newSubtotal;
-          orderObj.tax = Math.round(newSubtotal * 0.05 * 100) / 100;
-          orderObj.total = Math.round((newSubtotal + orderObj.tax) * 100) / 100;
+          const RestaurantSettings = require('../models/RestaurantSettings');
+          const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
+          const defaultGST = settings?.taxSettings?.defaultGSTPercent ?? 5;
+          const defaultVAT = settings?.taxSettings?.defaultVATPercent ?? 18.9;
+
+          let newSubtotal = 0;
+          let newTax = 0;
+          orderObj.items.forEach(i => {
+            if (i.status === 'Cancelled' || i.status === 'Void' || i.status === 'Voided' || i.status === 'Rejected' || i.isSpoiled) return;
+            const iTotal = i.totalPrice || (i.unitPrice * i.quantity) || 0;
+            newSubtotal += iTotal;
+            const isLiq = i.itemType === 'Liquor' || (i.itemType !== 'Food' && i.taxType === 'VAT');
+            const rate = i.taxRate ?? (isLiq ? defaultVAT : (i.taxType === 'Exempt' ? 0 : defaultGST));
+            newTax += (iTotal * rate) / 100;
+          });
+
+          orderObj.subtotal = Number(newSubtotal.toFixed(2));
+          orderObj.subTotal = orderObj.subtotal;
+          orderObj.tax = Number(newTax.toFixed(2));
+          orderObj.total = Math.max(0, Math.round(newSubtotal + newTax + (orderObj.serviceCharge || 0) - (orderObj.discount || 0)));
 
           await orderObj.save();
 
-          const io = req.app.get('io');
+          try {
+            const Bill = require('../models/Bill');
+            const activeBill = await Bill.findOne({
+              $or: [{ orders: orderObj._id }, ...(orderObj.table ? [{ table: orderObj.table }] : [])],
+              status: 'Active',
+              'splitInfo.isSplit': { $ne: true }
+            });
+            if (activeBill) {
+              const { syncBillWithOrders } = require('./billingController');
+              await syncBillWithOrders(activeBill._id);
+            }
+          } catch (syncErr) {
+            console.error('Error auto-syncing bill on spoilage:', syncErr);
+          }
+
+          const io = req.app.get('io') || global.io;
           if (io) {
             io.emit('order_updated', orderObj);
             io.emit('order_status_updated', orderObj);

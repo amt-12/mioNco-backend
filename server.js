@@ -79,8 +79,9 @@ const io = new Server(server, {
   }
 });
 
-// Make io accessible to our router
+// Make io accessible to our router and global scope
 app.set('io', io);
+global.io = io;
 
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.id}`);

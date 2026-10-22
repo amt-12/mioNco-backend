@@ -176,38 +176,44 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     let totalPrice = isSpoiled || isComp || isNC ? 0 : unitPrice * quantity;
     subtotal += totalPrice;
 
-    // Tax Determination Logic (On-Request -> Item -> Category -> System Default)
+    // Tax Determination Logic: Food is GST/Exempt, ONLY Liquor is VAT
     let taxType = 'GST';
     let taxRate = globalGstRate;
 
-    const isLiquorItem = item.itemType === 'Liquor' || menuItemDoc?.itemType === 'Liquor' || menuItemDoc?.taxType === 'VAT';
+    const nameLower = (foodName + ' ' + (menuItemDoc?.dishType || '')).toLowerCase();
+    const isAlcoholName = /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider)\b/i.test(nameLower);
+    const isExplicitLiquor = item.itemType === 'Liquor' || menuItemDoc?.itemType === 'Liquor';
+    const isExplicitFood = item.itemType === 'Food' || menuItemDoc?.itemType === 'Food';
+    const isLiquorItem = isExplicitLiquor || (!isExplicitFood && (menuItemDoc?.taxType === 'VAT' || item.taxType === 'VAT' || isAlcoholName));
 
     if (item.isOnRequest) {
-      taxType = item.taxType || (item.itemType === 'Liquor' ? 'VAT' : 'GST');
-      taxRate = item.taxRate ?? (taxType === 'VAT' ? globalVatRate : globalGstRate);
+      if (item.itemType === 'Liquor' || item.taxType === 'VAT' || isAlcoholName) {
+        taxType = 'VAT';
+        taxRate = item.taxRate ?? globalVatRate;
+      } else {
+        taxType = item.taxType === 'Exempt' ? 'Exempt' : 'GST';
+        taxRate = taxType === 'Exempt' ? 0 : (item.taxRate ?? globalGstRate);
+      }
     } else if (isLiquorItem) {
       taxType = 'VAT';
       taxRate = item.taxRate ?? menuItemDoc?.taxRate ?? globalVatRate;
-    } else if (menuItemDoc) {
-      if (menuItemDoc.taxType && menuItemDoc.taxType !== 'Inherit') {
-        taxType = menuItemDoc.taxType;
-        taxRate = menuItemDoc.taxRate ?? (taxType === 'VAT' ? globalVatRate : globalGstRate);
-      } else {
-        // Fallback to Category
-        let categoryDoc = null;
-        if (menuItemDoc.section) {
-          categoryDoc = await MenuCategory.findOne({ name: menuItemDoc.dishType }) || 
-                        await MenuCategory.findOne({ activeStatus: true });
-        }
-        if (categoryDoc && categoryDoc.taxType) {
-          taxType = categoryDoc.taxType;
-          taxRate = categoryDoc.taxRate ?? (taxType === 'VAT' ? globalVatRate : globalGstRate);
-        } else {
-          // Rule based default: if dishType or cuisine indicates Liquor / Alcohol / Beverage -> VAT
-          const nameLower = (foodName + ' ' + (menuItemDoc.dishType || '')).toLowerCase();
-          if (nameLower.includes('liquor') || nameLower.includes('cocktail') || nameLower.includes('whiskey') || nameLower.includes('wine') || nameLower.includes('beer') || nameLower.includes('alcohol') || nameLower.includes('spirits')) {
-            taxType = 'VAT';
-            taxRate = globalVatRate;
+    } else {
+      // Strictly Food / Non-liquor: default to GST or item's non-VAT tax
+      taxType = 'GST';
+      taxRate = globalGstRate;
+
+      if (menuItemDoc) {
+        if (menuItemDoc.taxType && menuItemDoc.taxType !== 'Inherit' && menuItemDoc.taxType !== 'VAT') {
+          taxType = menuItemDoc.taxType;
+          taxRate = menuItemDoc.taxRate ?? (taxType === 'Exempt' ? 0 : globalGstRate);
+        } else if (menuItemDoc.dishType) {
+          const categoryDoc = await MenuCategory.findOne({ name: menuItemDoc.dishType });
+          if (categoryDoc && categoryDoc.taxType === 'Exempt') {
+            taxType = 'Exempt';
+            taxRate = 0;
+          } else if (categoryDoc && categoryDoc.taxType === 'GST') {
+            taxType = 'GST';
+            taxRate = categoryDoc.taxRate ?? globalGstRate;
           }
         }
       }
@@ -253,7 +259,7 @@ const calculateBillTotals = async (rawItems, options = {}) => {
       isSpoiled,
       spoilageRemarks: item.spoilageRemarks || '',
       spoilageMarkedBy: item.spoilageMarkedBy || '',
-      itemType: item.itemType || (taxType === 'VAT' ? 'Liquor' : 'Food'),
+      itemType: isLiquorItem ? 'Liquor' : 'Food',
       sectionName: menuItemDoc?.section?.name || item.sectionName || '',
       addedBy: item.addedBy || null,
       reason: item.reason || ''
@@ -341,25 +347,70 @@ const syncBillWithOrders = async (billIdOrDoc) => {
       }
     }
 
-    if (orderIds.length === 0) return billDoc;
+    if (orderIds.length === 0) {
+      billDoc.items = [];
+      billDoc.subtotal = 0;
+      billDoc.billDiscountAmount = 0;
+      billDoc.cgstAmount = 0;
+      billDoc.sgstAmount = 0;
+      billDoc.vatAmount = 0;
+      billDoc.totalTaxAmount = 0;
+      billDoc.serviceChargeAmount = 0;
+      billDoc.finalAmount = 0;
+      billDoc.balanceDue = 0;
+      await billDoc.save();
+      try {
+        const io = global.io;
+        if (io) {
+          io.emit('bill_updated', billDoc);
+          io.emit('billing_updated');
+        }
+      } catch (e) {}
+      return billDoc;
+    }
 
     const orders = await Order.find({
       _id: { $in: orderIds },
       status: { $nin: ['Cancelled', 'Void', 'Voided'] }
     }).populate('items.menuItem');
 
-    if (orders.length === 0) return billDoc;
+    if (orders.length === 0) {
+      billDoc.items = [];
+      billDoc.subtotal = 0;
+      billDoc.billDiscountAmount = 0;
+      billDoc.cgstAmount = 0;
+      billDoc.sgstAmount = 0;
+      billDoc.vatAmount = 0;
+      billDoc.totalTaxAmount = 0;
+      billDoc.serviceChargeAmount = 0;
+      billDoc.finalAmount = 0;
+      billDoc.balanceDue = 0;
+      await billDoc.save();
+      try {
+        const io = global.io;
+        if (io) {
+          io.emit('bill_updated', billDoc);
+          io.emit('billing_updated');
+        }
+      } catch (e) {}
+      return billDoc;
+    }
 
-    // Consolidate non-cancelled, non-spoiled items from orders
+    // Consolidate non-cancelled, non-void, non-spoiled, non-rejected items from orders
     const rawItems = [];
     orders.forEach(ord => {
       (ord.items || []).forEach(item => {
-        if (item.status !== 'Cancelled' && item.status !== 'Void' && item.status !== 'Voided' && !item.isSpoiled) {
+        if (item.status !== 'Cancelled' && item.status !== 'Void' && item.status !== 'Voided' && item.status !== 'Rejected' && !item.isSpoiled) {
           const isSpoiled = Boolean(item.isSpoiled);
           const existingBillItem = (billDoc.items || []).find(bi => 
             (bi.menuItem && item.menuItem && String(bi.menuItem) === String(item.menuItem?._id || item.menuItem)) ||
             (bi.foodName && item.foodName && bi.foodName.trim().toLowerCase() === item.foodName.trim().toLowerCase())
           );
+
+          const isItemFood = item.itemType === 'Food' || (!item.itemType && existingBillItem?.itemType === 'Food');
+          const taxType = isItemFood && (item.taxType === 'VAT' || existingBillItem?.taxType === 'VAT')
+            ? 'GST'
+            : (item.taxType || existingBillItem?.taxType);
 
           rawItems.push({
             menuItem: item.menuItem?._id || item.menuItem,
@@ -373,7 +424,7 @@ const syncBillWithOrders = async (billIdOrDoc) => {
             spoilageRemarks: item.spoilageRemarks || '',
             spoilageMarkedBy: item.spoilageMarkedBy || '',
             itemType: item.itemType || existingBillItem?.itemType || 'Food',
-            taxType: item.taxType || existingBillItem?.taxType,
+            taxType,
             taxRate: item.taxRate ?? existingBillItem?.taxRate,
             addedBy: item.addedBy || existingBillItem?.addedBy,
             reason: item.reason || existingBillItem?.reason,
@@ -410,11 +461,21 @@ const syncBillWithOrders = async (billIdOrDoc) => {
 
     await billDoc.save();
 
-    return await Bill.findById(billDoc._id)
+    const populatedBill = await Bill.findById(billDoc._id)
       .populate('table')
       .populate('session')
       .populate('orders')
       .populate('createdBy', 'name role');
+
+    try {
+      const io = global.io;
+      if (io) {
+        io.emit('bill_updated', populatedBill);
+        io.emit('billing_updated');
+      }
+    } catch (sockErr) {}
+
+    return populatedBill;
   } catch (err) {
     console.error('Error in syncBillWithOrders:', err);
     return billIdOrDoc;
@@ -499,7 +560,7 @@ const resolveBillObject = async (idParam) => {
 
     if (ord) {
       const rawItems = (ord.items || [])
-        .filter(item => item.status !== 'Cancelled')
+        .filter(item => item.status !== 'Cancelled' && item.status !== 'Void' && item.status !== 'Voided' && item.status !== 'Rejected' && !item.isSpoiled)
         .map(item => ({
           menuItem: item.menuItem?._id || item.menuItem,
           foodName: item.foodName || item.menuItem?.foodName || 'Item',
@@ -557,7 +618,7 @@ const resolveBillObject = async (idParam) => {
     if (activeOrders.length > 0) {
       const rawItems = [];
       activeOrders.forEach(ord => {
-        (ord.items || []).filter(item => item.status !== 'Cancelled').forEach(item => {
+        (ord.items || []).filter(item => item.status !== 'Cancelled' && item.status !== 'Void' && item.status !== 'Voided' && item.status !== 'Rejected' && !item.isSpoiled).forEach(item => {
           rawItems.push({
             menuItem: item.menuItem?._id || item.menuItem,
             foodName: item.foodName || item.menuItem?.foodName || 'Item',
@@ -1067,7 +1128,7 @@ exports.splitBill = async (req, res) => {
       const ord = await Order.findOne(orderQuery).populate('items.menuItem');
       if (ord) {
         const rawItems = (ord.items || [])
-          .filter(item => item.status !== 'Cancelled')
+          .filter(item => item.status !== 'Cancelled' && item.status !== 'Void' && item.status !== 'Voided' && item.status !== 'Rejected' && !item.isSpoiled)
           .map(item => ({
             menuItem: item.menuItem?._id || item.menuItem,
             foodName: item.foodName || item.menuItem?.foodName || 'Item',
@@ -1387,7 +1448,7 @@ exports.mergeBills = async (req, res) => {
         if (!b) {
           try {
             const rawItems = (ord.items || [])
-              .filter(item => item.status !== 'Cancelled')
+              .filter(item => item.status !== 'Cancelled' && item.status !== 'Void' && item.status !== 'Voided' && item.status !== 'Rejected' && !item.isSpoiled)
               .map(item => ({
                 menuItem: item.menuItem?._id || item.menuItem,
                 foodName: item.foodName || item.menuItem?.foodName || 'Item',
@@ -2256,7 +2317,7 @@ exports.recordPayment = async (req, res) => {
           if (!targetTable) {
             targetTable = await resolveTableObjectId(ord.table);
           }
-          rawItems = (ord.items || []).filter(i => i.status !== 'Cancelled').map(i => ({
+          rawItems = (ord.items || []).filter(i => i.status !== 'Cancelled' && i.status !== 'Void' && i.status !== 'Voided' && i.status !== 'Rejected' && !i.isSpoiled).map(i => ({
             menuItem: i.menuItem?._id || i.menuItem,
             foodName: i.foodName || i.menuItem?.foodName || 'Item',
             variantName: i.variant?.name,

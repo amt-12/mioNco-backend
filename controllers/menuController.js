@@ -219,6 +219,10 @@ exports.createItem = async (req, res) => {
         item.taxRate = 18.90;
         if (!item.basePrice && item.sellingPrice) item.basePrice = item.sellingPrice;
         if (!item.sellingPrice && item.basePrice) item.sellingPrice = item.basePrice;
+      } else {
+        if (item.taxType === 'VAT') {
+          item.taxType = 'GST';
+        }
       }
     }
     
@@ -245,6 +249,10 @@ exports.updateItem = async (req, res) => {
       req.body.taxRate = 18.90;
       if (!req.body.basePrice && req.body.sellingPrice) req.body.basePrice = req.body.sellingPrice;
       if (!req.body.sellingPrice && req.body.basePrice) req.body.sellingPrice = req.body.basePrice;
+    } else if (req.body.itemType === 'Food') {
+      if (req.body.taxType === 'VAT') {
+        req.body.taxType = 'GST';
+      }
     }
 
     const item = await MenuItem.findByIdAndUpdate(req.params.id, req.body, {
