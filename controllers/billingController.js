@@ -132,6 +132,7 @@ const resolveTableObjectId = async (val) => {
 const calculateBillTotals = async (rawItems, options = {}) => {
   const {
     taxesEnabled = true,
+    vatEnabled = true,
     serviceChargeEnabled = true,
     customServiceChargeRate = null,
     discountType = 'None',
@@ -139,6 +140,15 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     isComplimentaryBill = false,
     isNonChargeableBill = false
   } = options;
+
+  // Auto-detect if any item is liquor — if so, force VAT enabled regardless of toggle
+  const hasLiquorItem = rawItems.some(item => {
+    if (item.itemType === 'Liquor') return true;
+    if (item.taxType === 'VAT') return true;
+    const nameLower = String(item.foodName || '').toLowerCase();
+    return /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider)\b/i.test(nameLower);
+  });
+  const effectiveVatEnabled = hasLiquorItem ? true : vatEnabled;
 
   // Load Settings for defaults
   const settings = await RestaurantSettings.findOne({ isSingleton: 'CONFIG' });
@@ -181,13 +191,21 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     let taxRate = globalGstRate;
 
     const nameLower = (foodName + ' ' + (menuItemDoc?.dishType || '')).toLowerCase();
-    const isAlcoholName = /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider)\b/i.test(nameLower);
+    const isAlcoholName = /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider|old fashioned|mojito|margarita|negroni|cosmopolitan|daiquiri|manhattan|martini|sangria|spritz|highball|sour|collins|fizz|julep|bellini|mimosa|paloma|caipirinha|pina colada|irish coffee|hot toddy|aperol|campari|kahlua|jagermeister|absinthe|amaretto|baileys|liit|long island)\b/i.test(nameLower);
+
+    // Check section name for liquor-related sections
+    const sectionNameLower = String(menuItemDoc?.section?.name || item.sectionName || '').toLowerCase();
+    const isLiquorSection = /\b(cocktail|cocktails|whisky|whiskey|vodka|gin|tequila|rum|liqueur|cognac|brandy|wine|beer|champaign|champagne|spirits|bar|liit|singlemalt|scotch|bourbon|red wine|white wine|rose wine)\b/i.test(sectionNameLower);
+
     const isExplicitLiquor = item.itemType === 'Liquor' || menuItemDoc?.itemType === 'Liquor';
-    const isExplicitFood = item.itemType === 'Food' || menuItemDoc?.itemType === 'Food';
-    const isLiquorItem = isExplicitLiquor || (!isExplicitFood && (menuItemDoc?.taxType === 'VAT' || item.taxType === 'VAT' || isAlcoholName));
+    // Only treat as "explicitly food" if itemType was actually set on the document (not just the schema default)
+    // Items with no itemType field inherit from section/name detection
+    const hasExplicitItemType = menuItemDoc ? (menuItemDoc._doc?.itemType !== undefined && menuItemDoc._doc?.itemType !== null) : (item.itemType !== undefined && item.itemType !== null);
+    const isExplicitFood = hasExplicitItemType && (item.itemType === 'Food' || menuItemDoc?.itemType === 'Food');
+    const isLiquorItem = isExplicitLiquor || isLiquorSection || (!isExplicitFood && (menuItemDoc?.taxType === 'VAT' || item.taxType === 'VAT' || isAlcoholName));
 
     if (item.isOnRequest) {
-      if (item.itemType === 'Liquor' || item.taxType === 'VAT' || isAlcoholName) {
+      if (item.itemType === 'Liquor' || item.taxType === 'VAT' || isAlcoholName || isLiquorSection) {
         taxType = 'VAT';
         taxRate = item.taxRate ?? globalVatRate;
       } else {
@@ -223,15 +241,15 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     let itemSGST = 0;
     let itemVAT = 0;
 
-    if (taxesEnabled && !isSpoiled && !isComp && !isNC && totalPrice > 0) {
-      if (taxType === 'GST') {
+    if (!isSpoiled && !isComp && !isNC && totalPrice > 0) {
+      if (taxType === 'GST' && taxesEnabled) {
         const halfRate = taxRate / 2;
         itemCGST = (totalPrice * halfRate) / 100;
         itemSGST = (totalPrice * halfRate) / 100;
         taxableAmountGST += totalPrice;
         cgstAmount += itemCGST;
         sgstAmount += itemSGST;
-      } else if (taxType === 'VAT') {
+      } else if (taxType === 'VAT' && effectiveVatEnabled) {
         itemVAT = (totalPrice * taxRate) / 100;
         taxableAmountVAT += totalPrice;
         vatAmount += itemVAT;
@@ -294,7 +312,7 @@ const calculateBillTotals = async (rawItems, options = {}) => {
 
   const roundedCgst = taxesEnabled ? Math.round(finalCgst) : 0;
   const roundedSgst = taxesEnabled ? Math.round(finalSgst) : 0;
-  const roundedVat = taxesEnabled ? Math.round(finalVat) : 0;
+  const roundedVat = effectiveVatEnabled ? Math.round(finalVat) : 0;
   const totalTaxAmount = roundedCgst + roundedSgst + roundedVat;
 
   // Service Charge Calculation
@@ -407,10 +425,8 @@ const syncBillWithOrders = async (billIdOrDoc) => {
             (bi.foodName && item.foodName && bi.foodName.trim().toLowerCase() === item.foodName.trim().toLowerCase())
           );
 
-          const isItemFood = item.itemType === 'Food' || (!item.itemType && existingBillItem?.itemType === 'Food');
-          const taxType = isItemFood && (item.taxType === 'VAT' || existingBillItem?.taxType === 'VAT')
-            ? 'GST'
-            : (item.taxType || existingBillItem?.taxType);
+          // Let calculateBillTotals determine the correct taxType based on section/name/itemType detection
+          const taxType = item.taxType || existingBillItem?.taxType;
 
           rawItems.push({
             menuItem: item.menuItem?._id || item.menuItem,
@@ -440,6 +456,7 @@ const syncBillWithOrders = async (billIdOrDoc) => {
 
     const calculated = await calculateBillTotals(rawItems, {
       taxesEnabled: billDoc.taxesEnabled !== false,
+      vatEnabled: billDoc.vatEnabled !== false,
       serviceChargeEnabled: billDoc.serviceChargeEnabled !== false,
       customServiceChargeRate: billDoc.serviceChargeRate,
       discountType: billDoc.billDiscountType || 'None',
@@ -1912,7 +1929,7 @@ exports.applyNonChargeable = async (req, res) => {
 // @access  Private
 exports.toggleTaxAndServiceCharge = async (req, res) => {
   try {
-    const { taxesEnabled, serviceChargeEnabled, serviceChargeRate, billNumber, orderId, tableId, items } = req.body;
+    const { taxesEnabled, serviceChargeEnabled, serviceChargeRate, vatEnabled, billNumber, orderId, tableId, items } = req.body;
     let bill = null;
 
     if (mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -2000,9 +2017,11 @@ exports.toggleTaxAndServiceCharge = async (req, res) => {
     if (typeof taxesEnabled === 'boolean') bill.taxesEnabled = taxesEnabled;
     if (typeof serviceChargeEnabled === 'boolean') bill.serviceChargeEnabled = serviceChargeEnabled;
     if (typeof serviceChargeRate === 'number') bill.serviceChargeRate = serviceChargeRate;
+    if (typeof vatEnabled === 'boolean') bill.vatEnabled = vatEnabled;
 
     const calculated = await calculateBillTotals(bill.items, {
       taxesEnabled: bill.taxesEnabled,
+      vatEnabled: bill.vatEnabled !== false,
       serviceChargeEnabled: bill.serviceChargeEnabled,
       customServiceChargeRate: bill.serviceChargeRate,
       discountType: bill.billDiscountType,
@@ -2037,9 +2056,11 @@ exports.toggleTaxAndServiceCharge = async (req, res) => {
         if (typeof taxesEnabled === 'boolean') sib.taxesEnabled = taxesEnabled;
         if (typeof serviceChargeEnabled === 'boolean') sib.serviceChargeEnabled = serviceChargeEnabled;
         if (typeof serviceChargeRate === 'number') sib.serviceChargeRate = serviceChargeRate;
+        if (typeof vatEnabled === 'boolean') sib.vatEnabled = vatEnabled;
 
         const sibCalc = await calculateBillTotals(sib.items, {
           taxesEnabled: sib.taxesEnabled,
+          vatEnabled: sib.vatEnabled !== false,
           serviceChargeEnabled: sib.serviceChargeEnabled,
           customServiceChargeRate: sib.serviceChargeRate,
           discountType: sib.billDiscountType,

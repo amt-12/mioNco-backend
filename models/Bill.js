@@ -117,6 +117,7 @@ const billSchema = new mongoose.Schema({
   serviceChargeAmount: { type: Number, default: 0 },
   serviceChargeEnabled: { type: Boolean, default: true },
   taxesEnabled: { type: Boolean, default: true },
+  vatEnabled: { type: Boolean, default: true },
   
   finalAmount: { type: Number, default: 0 },
   
