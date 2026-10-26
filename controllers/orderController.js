@@ -227,7 +227,11 @@ exports.createOrder = async (req, res) => {
 
             let rawPrice = item.unitPrice ?? item.price ?? item.menuItem?.basePrice ?? item.menuItem?.price ?? item.menuItem?.discountedPrice;
             if ((rawPrice === undefined || rawPrice === null || Number(rawPrice) === 0) && menuItemDoc) {
-                rawPrice = menuItemDoc.basePrice ?? menuItemDoc.discountedPrice ?? menuItemDoc.price ?? 0;
+                if ((item.variant?.name === 'Bottle' || item.portion === 'Bottle' || item.variantName === 'Bottle') && menuItemDoc.bottlePrice) {
+                    rawPrice = menuItemDoc.bottlePrice;
+                } else {
+                    rawPrice = menuItemDoc.basePrice ?? menuItemDoc.discountedPrice ?? menuItemDoc.price ?? 0;
+                }
             }
 
             let unitPrice = Number(rawPrice || 0);
@@ -295,7 +299,7 @@ exports.createOrder = async (req, res) => {
                 itemType,
                 taxType,
                 taxRate,
-                variant: item.variant,
+                variant: item.variant || (item.portion ? { name: item.portion, price: 0 } : (item.variantName ? { name: item.variantName, price: 0 } : undefined)),
                 customizations: item.customizations,
                 quantity,
                 unitPrice,
@@ -331,7 +335,11 @@ exports.createOrder = async (req, res) => {
                     try {
                         const mDoc = await MenuItem.findById(i.menuItem);
                         if (mDoc) {
-                            i.unitPrice = Number(mDoc.basePrice || mDoc.discountedPrice || 0);
+                            if ((i.variant?.name === 'Bottle' || i.portion === 'Bottle' || i.variantName === 'Bottle') && mDoc.bottlePrice) {
+                                i.unitPrice = Number(mDoc.bottlePrice);
+                            } else {
+                                i.unitPrice = Number(mDoc.basePrice || mDoc.discountedPrice || 0);
+                            }
                             i.totalPrice = i.unitPrice * (i.quantity || 1);
                         }
                     } catch (e) {}
@@ -1263,14 +1271,23 @@ exports.removeOrderItem = async (req, res) => {
 exports.addOrderItem = async (req, res) => {
     try {
         const { orderId } = req.params;
-        const { menuItemId, quantity = 1, unitPrice, notes } = req.body;
+        const { menuItemId, quantity = 1, unitPrice, notes, variant, portion, variantName } = req.body;
 
         const order = await Order.findById(orderId);
         if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
         const MenuItem = require('../models/MenuItem');
         const itemObj = await MenuItem.findById(menuItemId);
-        const price = unitPrice || itemObj?.price?.basePrice || itemObj?.basePrice || 0;
+        const resolvedPortion = variant?.name || portion || variantName;
+        let price = unitPrice;
+        if ((price === undefined || price === null || Number(price) === 0) && itemObj) {
+            if (resolvedPortion === 'Bottle' && itemObj.bottlePrice) {
+                price = itemObj.bottlePrice;
+            } else {
+                price = itemObj.price?.basePrice || itemObj.basePrice || 0;
+            }
+        }
+        price = Number(price || 0);
 
         if (req.body.waiter && !order.waiter) {
             order.waiter = req.body.waiter;
@@ -1314,6 +1331,7 @@ exports.addOrderItem = async (req, res) => {
             itemType,
             taxType,
             taxRate,
+            variant: variant || (resolvedPortion ? { name: resolvedPortion, price: 0 } : undefined),
             quantity,
             unitPrice: price,
             totalPrice: quantity * price,
