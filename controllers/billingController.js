@@ -141,12 +141,10 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     isNonChargeableBill = false
   } = options;
 
-  // Auto-detect if any item is liquor — if so, force VAT enabled regardless of toggle
+  // Auto-detect if any item is liquor strictly by itemType
   const hasLiquorItem = rawItems.some(item => {
-    if (item.itemType === 'Liquor') return true;
-    if (item.taxType === 'VAT') return true;
-    const nameLower = String(item.foodName || '').toLowerCase();
-    return /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider)\b/i.test(nameLower);
+    const rawType = String(item.itemType || item.menuItem?.itemType || '').trim().toLowerCase();
+    return rawType === 'liquor';
   });
   const effectiveVatEnabled = hasLiquorItem ? true : vatEnabled;
 
@@ -190,19 +188,8 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     let taxType = 'GST';
     let taxRate = globalGstRate;
 
-    const nameLower = (foodName + ' ' + (menuItemDoc?.dishType || '')).toLowerCase();
-    const isAlcoholName = /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider|old fashioned|mojito|margarita|negroni|cosmopolitan|daiquiri|manhattan|martini|sangria|spritz|highball|sour|collins|fizz|julep|bellini|mimosa|paloma|caipirinha|pina colada|irish coffee|hot toddy|aperol|campari|kahlua|jagermeister|absinthe|amaretto|baileys|liit|long island)\b/i.test(nameLower);
-
-    // Check section name for liquor-related sections
-    const sectionNameLower = String(menuItemDoc?.section?.name || item.sectionName || '').toLowerCase();
-    const isLiquorSection = /\b(cocktail|cocktails|whisky|whiskey|vodka|gin|tequila|rum|liqueur|cognac|brandy|wine|beer|champaign|champagne|spirits|bar|liit|singlemalt|scotch|bourbon|red wine|white wine|rose wine)\b/i.test(sectionNameLower);
-
-    const isExplicitLiquor = item.itemType === 'Liquor' || menuItemDoc?.itemType === 'Liquor';
-    // Only treat as "explicitly food" if itemType was actually set on the document (not just the schema default)
-    // Items with no itemType field inherit from section/name detection
-    const hasExplicitItemType = menuItemDoc ? (menuItemDoc._doc?.itemType !== undefined && menuItemDoc._doc?.itemType !== null) : (item.itemType !== undefined && item.itemType !== null);
-    const isExplicitFood = hasExplicitItemType && (item.itemType === 'Food' || menuItemDoc?.itemType === 'Food');
-    const isLiquorItem = isExplicitLiquor || isLiquorSection || (!isExplicitFood && (menuItemDoc?.taxType === 'VAT' || item.taxType === 'VAT' || isAlcoholName));
+    const rawItemType = String(item.itemType || menuItemDoc?.itemType || '').trim().toLowerCase();
+    const isLiquorItem = rawItemType === 'liquor';
 
     if (item.isOnRequest) {
       if (item.itemType === 'Liquor' || item.taxType === 'VAT' || isAlcoholName || isLiquorSection) {
@@ -2659,6 +2646,33 @@ exports.getBillingAnalytics = async (req, res) => {
   }
 };
 
+const isLiquorItem = (item) => {
+  if (!item) return false;
+  const rawType = String(item.itemType || item.menuItem?.itemType || '').trim().toLowerCase();
+  return rawType === 'liquor';
+};
+
+const getLiquorCategory = (item) => {
+  const section = String(item.sectionName || item.section || '').trim();
+  if (section && !/^(menu|general|food|beverage|beverages|drinks)$/i.test(section)) {
+    return section.toUpperCase();
+  }
+  const nameLower = String(item.foodName || item.itemName || item.name || '').toLowerCase();
+  if (/single\s*malt|singlemalt/i.test(nameLower)) return 'SINGLE MALT WHISKY';
+  if (/whisky|whiskey|scotch|bourbon/i.test(nameLower)) return 'WHISKY';
+  if (/vodka/i.test(nameLower)) return 'VODKA';
+  if (/gin/i.test(nameLower)) return 'GIN';
+  if (/tequila/i.test(nameLower)) return 'TEQUILA';
+  if (/rum/i.test(nameLower)) return 'RUM';
+  if (/beer|ale|cider|lager|stout/i.test(nameLower)) return 'BEER';
+  if (/wine|champagne|prosecco|sangria/i.test(nameLower)) return 'WINE';
+  if (/liit|long island/i.test(nameLower)) return 'LIIT';
+  if (/cocktail|mojito|margarita|martini|negroni|cosmopolitan|daiquiri|spritz|sour|collins/i.test(nameLower)) return 'COCKTAILS';
+  if (/liqueur|kahlua|baileys|jagermeister|aperol|campari/i.test(nameLower)) return 'LIQUEUR';
+  if (/brandy|cognac/i.test(nameLower)) return 'COGNAC & BRANDY';
+  return 'OTHER SPIRITS';
+};
+
 // @desc    Get Comprehensive Daily Sales Report
 // @route   GET /api/v1/billing/daily-sales-report
 // @access  Private
@@ -2961,6 +2975,21 @@ exports.getDailySalesReport = async (req, res) => {
     let serviceChargeRemovalsCount = 0;
     let serviceChargeRemovedAmount = 0;
 
+    // Liquor & Food separation metrics
+    let totalLiquorNet = 0;
+    let totalLiquorGross = 0;
+    let totalLiquorVAT = 0;
+    let totalLiquorQty = 0;
+    let billsWithLiquorCount = 0;
+
+    let totalFoodNet = 0;
+    let totalFoodGross = 0;
+    let totalFoodGST = 0;
+    let totalFoodQty = 0;
+
+    const liquorItemsMap = {};
+    const liquorCategoriesMap = {};
+
     const discountReport = [];
     const ncReport = [];
     const modificationLogs = [];
@@ -3201,6 +3230,56 @@ exports.getDailySalesReport = async (req, res) => {
             }
           }
         }
+      }
+
+      // Track Food vs Liquor item metrics on settled / partially paid bills
+      const isSettledOrPartiallyPaid = (bill.paymentStatus === 'Paid' || bill.status === 'Settled' || bill.paymentStatus === 'Partially Paid') && bill.paymentStatus !== 'Hold' && bill.paymentStatus !== 'Pending';
+      if (isSettledOrPartiallyPaid && !isNCBill) {
+        const payRatio = bill.paymentStatus === 'Partially Paid' && bill.finalAmount > 0 ? (Number(bill.amountPaid || 0) / bill.finalAmount) : 1;
+        let billHadLiquor = false;
+        (bill.items || []).forEach(item => {
+          if (item.isSpoiled || item.isComplimentary || item.isNonChargeable) return;
+          const qty = Number(item.quantity || 1);
+          const rawPrice = Number(item.totalPrice > 0 ? item.totalPrice : (item.unitPrice * qty) || 0);
+          const effectiveItemNet = rawPrice * payRatio;
+
+          if (isLiquorItem(item)) {
+            billHadLiquor = true;
+            const vat = Number(item.vatAmount ? item.vatAmount * payRatio : ((effectiveItemNet * (item.taxRate || 18.9)) / 100));
+            const gross = effectiveItemNet + vat;
+            totalLiquorNet += effectiveItemNet;
+            totalLiquorVAT += vat;
+            totalLiquorGross += gross;
+            totalLiquorQty += qty;
+
+            const name = item.foodName || 'Liquor Item';
+            const cat = getLiquorCategory(item);
+            if (!liquorItemsMap[name]) {
+              liquorItemsMap[name] = { foodName: name, category: cat, unitPrice: Number(item.unitPrice || 0), quantity: 0, netSales: 0, vatAmount: 0, grossSales: 0, billsCount: 0 };
+            }
+            liquorItemsMap[name].quantity += qty;
+            liquorItemsMap[name].netSales += effectiveItemNet;
+            liquorItemsMap[name].vatAmount += vat;
+            liquorItemsMap[name].grossSales += gross;
+            liquorItemsMap[name].billsCount += 1;
+
+            if (!liquorCategoriesMap[cat]) {
+              liquorCategoriesMap[cat] = { category: cat, quantity: 0, netSales: 0, vatAmount: 0, grossSales: 0, billsCount: 0 };
+            }
+            liquorCategoriesMap[cat].quantity += qty;
+            liquorCategoriesMap[cat].netSales += effectiveItemNet;
+            liquorCategoriesMap[cat].vatAmount += vat;
+            liquorCategoriesMap[cat].grossSales += gross;
+            liquorCategoriesMap[cat].billsCount += 1;
+          } else {
+            const gst = Number(((item.cgstAmount || 0) + (item.sgstAmount || 0)) * payRatio);
+            totalFoodNet += effectiveItemNet;
+            totalFoodGST += gst;
+            totalFoodGross += (effectiveItemNet + gst);
+            totalFoodQty += qty;
+          }
+        });
+        if (billHadLiquor) billsWithLiquorCount++;
       }
 
       // Individual NC / Complimentary Items inside bills
@@ -3574,7 +3653,19 @@ exports.getDailySalesReport = async (req, res) => {
               mode: pm.mode,
               totalAmount: Number(pm.totalAmount.toFixed(2)),
               count: pm.count
-            }))
+            })),
+          liquorSummary: {
+            totalLiquorNet: Number(totalLiquorNet.toFixed(2)),
+            totalLiquorGross: Number(totalLiquorGross.toFixed(2)),
+            totalLiquorVAT: Number(totalLiquorVAT.toFixed(2)),
+            totalLiquorQty,
+            billsWithLiquorCount,
+            totalFoodNet: Number(totalFoodNet.toFixed(2)),
+            totalFoodGross: Number(totalFoodGross.toFixed(2)),
+            totalFoodGST: Number(totalFoodGST.toFixed(2)),
+            totalFoodQty,
+            liquorSharePercentage: (totalLiquorGross + totalFoodGross) > 0 ? Number(((totalLiquorGross / (totalLiquorGross + totalFoodGross)) * 100).toFixed(1)) : 0
+          }
         },
         reports: {
           billsList,
@@ -3585,12 +3676,413 @@ exports.getDailySalesReport = async (req, res) => {
           modificationLogs,
           cancellationLogs,
           scRemovalLogs,
-          spoilageLogs
+          spoilageLogs,
+          liquorReport: {
+            items: Object.values(liquorItemsMap).map(i => ({
+              ...i,
+              netSales: Number(i.netSales.toFixed(2)),
+              vatAmount: Number(i.vatAmount.toFixed(2)),
+              grossSales: Number(i.grossSales.toFixed(2))
+            })).sort((a, b) => b.grossSales - a.grossSales),
+            categories: Object.values(liquorCategoriesMap).map(c => ({
+              ...c,
+              netSales: Number(c.netSales.toFixed(2)),
+              vatAmount: Number(c.vatAmount.toFixed(2)),
+              grossSales: Number(c.grossSales.toFixed(2)),
+              sharePercentage: totalLiquorGross > 0 ? Number(((c.grossSales / totalLiquorGross) * 100).toFixed(1)) : 0
+            })).sort((a, b) => b.grossSales - a.grossSales)
+          }
         }
       }
     });
   } catch (error) {
     console.error('Error generating daily sales report:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Get Comprehensive Liquor Sales Report
+// @route   GET /api/v1/billing/liquor-sales
+// @access  Private
+exports.getLiquorSalesReport = async (req, res) => {
+  try {
+    const { date, startDate, endDate, month, year, timezoneOffset } = req.query;
+
+    const tzOffsetMinutes = timezoneOffset !== undefined && !isNaN(Number(timezoneOffset)) 
+      ? Number(timezoneOffset) 
+      : -330;
+    const tzOffsetMs = tzOffsetMinutes * 60 * 1000;
+
+    const now = new Date();
+    const localNow = new Date(now.getTime() - tzOffsetMs);
+    const todayY = localNow.getUTCFullYear();
+    const todayM = localNow.getUTCMonth() + 1;
+    const todayD = localNow.getUTCDate();
+    const todayDateStr = `${todayY}-${String(todayM).padStart(2, '0')}-${String(todayD).padStart(2, '0')}`;
+
+    let start, end;
+    let filterMode = 'month';
+    let periodLabel = '';
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+    if (startDate && endDate) {
+      filterMode = 'range';
+      const sParts = String(startDate).split('-');
+      const eParts = String(endDate).split('-');
+      if (sParts.length === 3 && eParts.length === 3) {
+        const [sY, sM, sD] = sParts.map(Number);
+        const [eY, eM, eD] = eParts.map(Number);
+        start = new Date(Date.UTC(sY, sM - 1, sD, 0, 0, 0, 0) + tzOffsetMs);
+        end = new Date(Date.UTC(eY, eM - 1, eD, 23, 59, 59, 999) + tzOffsetMs);
+      } else {
+        start = new Date(startDate);
+        start.setHours(0, 0, 0, 0);
+        end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+      }
+      periodLabel = `${startDate} to ${endDate}`;
+    } else if (date) {
+      filterMode = 'single';
+      const parts = String(date).split('-');
+      if (parts.length === 3) {
+        const [y, m, d] = parts.map(Number);
+        start = new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0) + tzOffsetMs);
+        end = new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999) + tzOffsetMs);
+      } else {
+        start = new Date(date);
+        start.setHours(0, 0, 0, 0);
+        end = new Date(date);
+        end.setHours(23, 59, 59, 999);
+      }
+      periodLabel = date;
+    } else if (month) {
+      filterMode = 'month';
+      let targetYear = year ? Number(year) : todayY;
+      let targetMonth;
+      if (String(month).includes('-')) {
+        const [mY, mM] = String(month).split('-').map(Number);
+        targetYear = mY || targetYear;
+        targetMonth = mM;
+      } else {
+        targetMonth = Number(month);
+      }
+      const lastDay = new Date(Date.UTC(targetYear, targetMonth, 0)).getUTCDate();
+      start = new Date(Date.UTC(targetYear, targetMonth - 1, 1, 0, 0, 0, 0) + tzOffsetMs);
+      end = new Date(Date.UTC(targetYear, targetMonth - 1, lastDay, 23, 59, 59, 999) + tzOffsetMs);
+      periodLabel = `${monthNames[targetMonth - 1]} ${targetYear}`;
+    } else {
+      filterMode = 'month';
+      const lastDay = new Date(Date.UTC(todayY, todayM, 0)).getUTCDate();
+      start = new Date(Date.UTC(todayY, todayM - 1, 1, 0, 0, 0, 0) + tzOffsetMs);
+      end = new Date(Date.UTC(todayY, todayM - 1, lastDay, 23, 59, 59, 999) + tzOffsetMs);
+      periodLabel = `${monthNames[todayM - 1]} ${todayY}`;
+    }
+
+    const BusinessDay = require('../models/BusinessDay');
+    let shiftWindowStart = start;
+    let shiftWindowEnd = end;
+
+    const startDateStr = start.toISOString().split('T')[0];
+    const endDateStr = end.toISOString().split('T')[0];
+
+    const bDayQuery = {
+      $or: [
+        { businessDate: { $gte: startDateStr, $lte: endDateStr } },
+        { startTime: { $gte: start, $lte: end } }
+      ]
+    };
+    const targetBusinessDays = await BusinessDay.find(bDayQuery);
+    let targetDayIds = [];
+    if (targetBusinessDays.length > 0) {
+      targetDayIds = targetBusinessDays.map(b => b._id);
+      targetBusinessDays.forEach(b => {
+        if (b.startTime && b.startTime < shiftWindowStart) shiftWindowStart = b.startTime;
+        const bEnd = b.endTime || (b.status === 'Open' ? new Date() : b.updatedAt);
+        if (bEnd && bEnd > shiftWindowEnd) shiftWindowEnd = bEnd;
+      });
+    }
+
+    const bills = await Bill.find({
+      $or: [
+        { businessDate: { $gte: startDateStr, $lte: endDateStr } },
+        ...(targetDayIds.length > 0 ? [{ businessDay: { $in: targetDayIds } }] : []),
+        { createdAt: { $gte: shiftWindowStart, $lte: shiftWindowEnd } }
+      ]
+    })
+      .populate('table')
+      .populate('createdBy', 'name role')
+      .populate('ncEmployee', 'name role')
+      .sort({ createdAt: -1 });
+
+    let totalLiquorNet = 0;
+    let totalLiquorGross = 0;
+    let totalLiquorVAT = 0;
+    let totalLiquorQty = 0;
+    let billsWithLiquorCount = 0;
+
+    let totalFoodNet = 0;
+    let totalFoodGross = 0;
+    let totalFoodGST = 0;
+    let totalFoodQty = 0;
+
+    let ncLiquorCount = 0;
+    let ncLiquorValue = 0;
+    const ncLiquorList = [];
+
+    const itemMap = {};
+    const categoryMap = {};
+    const dailyMap = {};
+    const liquorBillsList = [];
+
+    bills.forEach(bill => {
+      if (bill.status === 'Merged' || bill.paymentStatus === 'Merged') return;
+      if (bill.billNumber === 'BIS-1EY98E' || bill.billNumber === 'BIS-BFD700') return;
+
+      const isCancelled = bill.status === 'Cancelled' || bill.paymentStatus === 'Cancelled';
+      const isVoided = bill.status === 'Voided' || bill.paymentStatus === 'Voided';
+      if (isCancelled || isVoided) return;
+
+      const isNCBill = bill.isNonChargeableBill || bill.isComplimentaryBill || bill.paymentStatus === 'Non-Chargeable';
+      const isHold = bill.paymentStatus === 'Hold';
+      const isPending = bill.paymentStatus === 'Pending' || (!bill.paymentStatus && bill.status !== 'Settled');
+      const isPartiallyPaid = bill.paymentStatus === 'Partially Paid';
+      const isPaid = (bill.paymentStatus === 'Paid' || bill.status === 'Settled') && !isHold && !isPending;
+
+      let billHasLiquor = false;
+      let billLiquorQty = 0;
+      let billLiquorNet = 0;
+      let billLiquorVat = 0;
+      const billLiquorItemsSummaries = [];
+
+      const billLocalDate = bill.businessDate || (bill.createdAt ? new Date(bill.createdAt.getTime() - tzOffsetMs).toISOString().split('T')[0] : todayDateStr);
+
+      (bill.items || []).forEach(item => {
+        if (item.isSpoiled) return;
+
+        const isLiquor = isLiquorItem(item);
+        const qty = Number(item.quantity || 1);
+        const unitPrice = Number(item.unitPrice || (item.totalPrice / (qty || 1)) || 0);
+        const totalPrice = Number(item.totalPrice > 0 ? item.totalPrice : (unitPrice * qty) || 0);
+        const isItemNC = isNCBill || item.isComplimentary || item.isNonChargeable;
+
+        if (isLiquor) {
+          if (isItemNC) {
+            ncLiquorCount += qty;
+            const waived = unitPrice * qty;
+            ncLiquorValue += waived;
+            ncLiquorList.push({
+              billNumber: bill.billNumber,
+              tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : (bill.table?.name || 'Dine-In'),
+              foodName: item.foodName,
+              quantity: qty,
+              value: waived,
+              reason: item.ncRemark || item.complimentaryReason || bill.notes || 'NC / Complimentary',
+              staff: bill.createdBy?.name || 'Staff',
+              timestamp: bill.createdAt
+            });
+            return;
+          }
+
+          if (isPaid || isPartiallyPaid) {
+            billHasLiquor = true;
+            billLiquorQty += qty;
+
+            const payRatio = isPartiallyPaid && bill.finalAmount > 0 ? (Number(bill.amountPaid || 0) / bill.finalAmount) : 1;
+            const effectiveNet = totalPrice * payRatio;
+            const vatRate = Number(item.taxRate || 18.9);
+            const effectiveVat = Number((item.vatAmount ? item.vatAmount * payRatio : (effectiveNet * vatRate) / 100));
+            const effectiveGross = effectiveNet + effectiveVat;
+
+            billLiquorNet += effectiveNet;
+            billLiquorVat += effectiveVat;
+            billLiquorItemsSummaries.push(`${qty}x ${item.foodName || 'Item'}`);
+
+            totalLiquorNet += effectiveNet;
+            totalLiquorVAT += effectiveVat;
+            totalLiquorGross += effectiveGross;
+            totalLiquorQty += qty;
+
+            const itemName = item.foodName || 'Liquor Item';
+            const itemCat = getLiquorCategory(item);
+            if (!itemMap[itemName]) {
+              itemMap[itemName] = {
+                foodName: itemName,
+                category: itemCat,
+                unitPrice: unitPrice,
+                quantity: 0,
+                netSales: 0,
+                vatAmount: 0,
+                grossSales: 0,
+                billsCount: 0,
+                billIds: new Set()
+              };
+            }
+            itemMap[itemName].quantity += qty;
+            itemMap[itemName].netSales += effectiveNet;
+            itemMap[itemName].vatAmount += effectiveVat;
+            itemMap[itemName].grossSales += effectiveGross;
+            if (!itemMap[itemName].billIds.has(String(bill._id))) {
+              itemMap[itemName].billIds.add(String(bill._id));
+              itemMap[itemName].billsCount += 1;
+            }
+
+            if (!categoryMap[itemCat]) {
+              categoryMap[itemCat] = {
+                category: itemCat,
+                quantity: 0,
+                netSales: 0,
+                vatAmount: 0,
+                grossSales: 0,
+                billsCount: 0,
+                billIds: new Set()
+              };
+            }
+            categoryMap[itemCat].quantity += qty;
+            categoryMap[itemCat].netSales += effectiveNet;
+            categoryMap[itemCat].vatAmount += effectiveVat;
+            categoryMap[itemCat].grossSales += effectiveGross;
+            if (!categoryMap[itemCat].billIds.has(String(bill._id))) {
+              categoryMap[itemCat].billIds.add(String(bill._id));
+              categoryMap[itemCat].billsCount += 1;
+            }
+
+            if (!dailyMap[billLocalDate]) {
+              const dObj = new Date(billLocalDate + 'T00:00:00Z');
+              const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+              dailyMap[billLocalDate] = {
+                date: billLocalDate,
+                dayOfWeek: dayNames[dObj.getUTCDay()],
+                quantity: 0,
+                netSales: 0,
+                vatAmount: 0,
+                grossSales: 0,
+                billsCount: 0,
+                billIds: new Set()
+              };
+            }
+            dailyMap[billLocalDate].quantity += qty;
+            dailyMap[billLocalDate].netSales += effectiveNet;
+            dailyMap[billLocalDate].vatAmount += effectiveVat;
+            dailyMap[billLocalDate].grossSales += effectiveGross;
+            if (!dailyMap[billLocalDate].billIds.has(String(bill._id))) {
+              dailyMap[billLocalDate].billIds.add(String(bill._id));
+              dailyMap[billLocalDate].billsCount += 1;
+            }
+          }
+        } else {
+          if (!isItemNC && (isPaid || isPartiallyPaid)) {
+            const payRatio = isPartiallyPaid && bill.finalAmount > 0 ? (Number(bill.amountPaid || 0) / bill.finalAmount) : 1;
+            const effectiveNet = totalPrice * payRatio;
+            const gst = Number(((item.cgstAmount || 0) + (item.sgstAmount || 0)) * payRatio);
+            totalFoodNet += effectiveNet;
+            totalFoodGST += gst;
+            totalFoodGross += (effectiveNet + gst);
+            totalFoodQty += qty;
+          }
+        }
+      });
+
+      if (billHasLiquor) {
+        billsWithLiquorCount++;
+        liquorBillsList.push({
+          _id: bill._id,
+          billNumber: bill.billNumber,
+          tableName: bill.table?.tableNumber ? `Table ${bill.table.tableNumber}` : (bill.table?.name || 'Takeaway/Walk-in'),
+          businessDate: billLocalDate,
+          timestamp: bill.createdAt,
+          itemsSummary: billLiquorItemsSummaries.join(', '),
+          liquorQty: billLiquorQty,
+          liquorNet: Number(billLiquorNet.toFixed(2)),
+          liquorVat: Number(billLiquorVat.toFixed(2)),
+          liquorGross: Number((billLiquorNet + billLiquorVat).toFixed(2)),
+          totalBillAmount: Number((bill.finalAmount || 0).toFixed(2)),
+          paymentStatus: bill.paymentStatus || 'Paid',
+          paymentMethod: (bill.payments && bill.payments.length > 0)
+            ? [...new Set(bill.payments.map(p => p.mode || 'Cash'))].join(', ')
+            : (bill.paymentMethod || 'Cash'),
+          staff: bill.createdBy?.name || 'Staff'
+        });
+      }
+    });
+
+    const totalRestaurantGross = totalLiquorGross + totalFoodGross;
+    const liquorSharePercentage = totalRestaurantGross > 0 ? Number(((totalLiquorGross / totalRestaurantGross) * 100).toFixed(1)) : 0;
+    const foodSharePercentage = totalRestaurantGross > 0 ? Number(((totalFoodGross / totalRestaurantGross) * 100).toFixed(1)) : 0;
+    const averageLiquorSpendPerBill = billsWithLiquorCount > 0 ? Number((totalLiquorGross / billsWithLiquorCount).toFixed(2)) : 0;
+
+    const dailyTrend = Object.values(dailyMap)
+      .map(d => ({
+        date: d.date,
+        dayOfWeek: d.dayOfWeek,
+        quantity: d.quantity,
+        netSales: Number(d.netSales.toFixed(2)),
+        vatAmount: Number(d.vatAmount.toFixed(2)),
+        grossSales: Number(d.grossSales.toFixed(2)),
+        billsCount: d.billsCount
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    const categoryBreakdown = Object.values(categoryMap)
+      .map(c => ({
+        category: c.category,
+        quantity: c.quantity,
+        netSales: Number(c.netSales.toFixed(2)),
+        vatAmount: Number(c.vatAmount.toFixed(2)),
+        grossSales: Number(c.grossSales.toFixed(2)),
+        billsCount: c.billsCount,
+        sharePercentage: totalLiquorGross > 0 ? Number(((c.grossSales / totalLiquorGross) * 100).toFixed(1)) : 0
+      }))
+      .sort((a, b) => b.grossSales - a.grossSales);
+
+    const itemizedSales = Object.values(itemMap)
+      .map(i => ({
+        foodName: i.foodName,
+        category: i.category,
+        unitPrice: Number(i.unitPrice.toFixed(2)),
+        quantity: i.quantity,
+        netSales: Number(i.netSales.toFixed(2)),
+        vatAmount: Number(i.vatAmount.toFixed(2)),
+        grossSales: Number(i.grossSales.toFixed(2)),
+        billsCount: i.billsCount,
+        sharePercentage: totalLiquorGross > 0 ? Number(((i.grossSales / totalLiquorGross) * 100).toFixed(1)) : 0
+      }))
+      .sort((a, b) => b.grossSales - a.grossSales);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filter: {
+          mode: filterMode,
+          startDate: start,
+          endDate: end,
+          periodLabel
+        },
+        summary: {
+          totalLiquorGross: Number(totalLiquorGross.toFixed(2)),
+          totalLiquorNet: Number(totalLiquorNet.toFixed(2)),
+          totalLiquorVAT: Number(totalLiquorVAT.toFixed(2)),
+          totalLiquorQty,
+          billsWithLiquorCount,
+          averageLiquorSpendPerBill,
+          totalFoodNet: Number(totalFoodNet.toFixed(2)),
+          totalFoodGross: Number(totalFoodGross.toFixed(2)),
+          totalFoodGST: Number(totalFoodGST.toFixed(2)),
+          totalFoodQty,
+          totalRestaurantGross: Number(totalRestaurantGross.toFixed(2)),
+          liquorSharePercentage,
+          foodSharePercentage,
+          ncLiquorCount,
+          ncLiquorValue: Number(ncLiquorValue.toFixed(2))
+        },
+        dailyTrend,
+        categoryBreakdown,
+        itemizedSales,
+        billsList: liquorBillsList,
+        ncLiquorList
+      }
+    });
+  } catch (error) {
+    console.error('Error generating liquor sales report:', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -3612,3 +4104,4 @@ exports.syncBill = async (req, res) => {
 };
 
 exports.syncBillWithOrders = syncBillWithOrders;
+

@@ -17,6 +17,7 @@ const {
   settleHoldBill,
   getBillingAnalytics,
   getDailySalesReport,
+  getLiquorSalesReport,
   deleteBill,
   syncBill
 } = require('../controllers/billingController');
@@ -28,6 +29,7 @@ const router = express.Router();
 router.use(protect);
 
 router.get('/daily-sales-report', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getDailySalesReport);
+router.get('/liquor-sales', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getLiquorSalesReport);
 router.post('/generate', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), generateBill);
 router.get('/', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), getBills);
 router.get('/analytics/summary', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getBillingAnalytics);

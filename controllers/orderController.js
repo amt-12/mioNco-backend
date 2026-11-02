@@ -183,9 +183,8 @@ exports.createOrder = async (req, res) => {
         const processedItems = await Promise.all(items.map(async item => {
             if (item.isOnRequest) {
                 const foodName = item.foodName || item.name || 'On-Request Item';
-                const nameLower = foodName.toLowerCase();
-                const isAlcoholName = /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider)\b/i.test(nameLower);
-                const isLiquor = item.itemType === 'Liquor' || (!item.itemType && (item.taxType === 'VAT' || isAlcoholName));
+                const rawType = String(item.itemType || '').trim().toLowerCase();
+                const isLiquor = rawType === 'liquor' || item.taxType === 'VAT';
                 const itemType = isLiquor ? 'Liquor' : 'Food';
                 const taxType = isLiquor ? 'VAT' : (item.taxType === 'Exempt' ? 'Exempt' : 'GST');
                 const taxRate = item.taxRate ?? (taxType === 'VAT' ? defaultVAT : (taxType === 'Exempt' ? 0 : defaultGST));
@@ -248,11 +247,8 @@ exports.createOrder = async (req, res) => {
             const totalPrice = unitPrice * quantity;
             addedSubtotal += totalPrice;
 
-            const nameLower = ((menuItemDoc?.foodName || item.foodName || '') + ' ' + (menuItemDoc?.dishType || '')).toLowerCase();
-            const isAlcoholName = /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider)\b/i.test(nameLower);
-            const isExplicitLiquor = item.itemType === 'Liquor' || menuItemDoc?.itemType === 'Liquor';
-            const isExplicitFood = item.itemType === 'Food' || menuItemDoc?.itemType === 'Food';
-            const isLiquorItem = isExplicitLiquor || (!isExplicitFood && (menuItemDoc?.taxType === 'VAT' || item.taxType === 'VAT' || isAlcoholName));
+            const rawType = String(item.itemType || menuItemDoc?.itemType || '').trim().toLowerCase();
+            const isLiquorItem = rawType === 'liquor';
             const itemType = isLiquorItem ? 'Liquor' : 'Food';
             
             let taxType = 'GST';
