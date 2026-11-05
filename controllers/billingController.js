@@ -141,10 +141,15 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     isNonChargeableBill = false
   } = options;
 
-  // Auto-detect if any item is liquor strictly by itemType
+  // Auto-detect if any item is liquor strictly by itemType or VAT tax
   const hasLiquorItem = rawItems.some(item => {
     const rawType = String(item.itemType || item.menuItem?.itemType || '').trim().toLowerCase();
-    return rawType === 'liquor';
+    if (rawType === 'liquor' || item.taxType === 'VAT') return true;
+    if (item.isOnRequest) {
+      const name = String(item.foodName || '').toLowerCase();
+      return /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider)\b/i.test(name);
+    }
+    return false;
   });
   const effectiveVatEnabled = hasLiquorItem ? true : vatEnabled;
 
@@ -189,15 +194,22 @@ const calculateBillTotals = async (rawItems, options = {}) => {
     let taxRate = globalGstRate;
 
     const rawItemType = String(item.itemType || menuItemDoc?.itemType || '').trim().toLowerCase();
-    const isLiquorItem = rawItemType === 'liquor';
+    const nameLower = (foodName + ' ' + (menuItemDoc?.dishType || '')).toLowerCase();
+    const isAlcoholName = /\b(liquor|cocktail|whiskey|whisky|wine|beer|alcohol|spirits|vodka|rum|gin|tequila|brandy|champagne|scotch|bourbon|liqueur|shooter|cognac|ale|cider)\b/i.test(nameLower);
+    const sectionNameLower = String(menuItemDoc?.section?.name || item.sectionName || '').toLowerCase();
+    const isLiquorSection = /\b(cocktail|cocktails|whisky|whiskey|vodka|gin|tequila|rum|liqueur|cognac|brandy|wine|beer|champaign|champagne|spirits|bar|liit|singlemalt|scotch|bourbon|red wine|white wine|rose wine)\b/i.test(sectionNameLower);
+
+    let isLiquorItem = rawItemType === 'liquor';
 
     if (item.isOnRequest) {
-      if (item.itemType === 'Liquor' || item.taxType === 'VAT' || isAlcoholName || isLiquorSection) {
+      if (rawItemType === 'liquor' || item.taxType === 'VAT' || isAlcoholName || isLiquorSection) {
         taxType = 'VAT';
         taxRate = item.taxRate ?? globalVatRate;
+        isLiquorItem = true;
       } else {
         taxType = item.taxType === 'Exempt' ? 'Exempt' : 'GST';
         taxRate = taxType === 'Exempt' ? 0 : (item.taxRate ?? globalGstRate);
+        isLiquorItem = false;
       }
     } else if (isLiquorItem) {
       taxType = 'VAT';
