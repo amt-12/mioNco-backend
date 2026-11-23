@@ -247,5 +247,10 @@ billSchema.index({ paymentStatus: 1, createdAt: -1 });
 billSchema.index({ isNonChargeableBill: 1, createdAt: -1 });
 billSchema.index({ isNonChargeableBill: 1, ncGivenBy: 1, createdAt: -1 });
 billSchema.index({ isNonChargeableBill: 1, ncGivenTo: 1, createdAt: -1 });
+billSchema.index({ billDiscountAmount: 1, createdAt: -1 });
+billSchema.index({ businessDate: 1, createdAt: -1 });
+billSchema.index({ table: 1, status: 1, createdAt: -1 });
+billSchema.index({ orders: 1 });
+billSchema.index({ session: 1 });
 
 module.exports = mongoose.model('Bill', billSchema);

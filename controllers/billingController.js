@@ -935,7 +935,7 @@ exports.getBills = async (req, res) => {
           { businessDate: { $gte: startDate, $lte: endDate } },
           { startTime: { $gte: sDate, $lte: eDate } }
         ]
-      });
+      }).select('_id').lean();
       const dayIds = matchingBusinessDays.map(b => b._id);
 
       andConditions.push({
@@ -964,7 +964,7 @@ exports.getBills = async (req, res) => {
           { businessDate: date },
           { startTime: { $gte: sDate, $lte: eDate } }
         ]
-      });
+      }).select('_id').lean();
       const dayIds = matchingBusinessDays.map(b => b._id);
 
       andConditions.push({
@@ -1023,7 +1023,7 @@ exports.getBills = async (req, res) => {
           { name: { $regex: activeGivenBy, $options: 'i' } },
           { username: { $regex: activeGivenBy, $options: 'i' } }
         ]
-      }).select('_id');
+      }).select('_id').lean();
       const staffIds = matchingStaff.map(u => u._id);
 
       const givenByOr = [
@@ -1047,7 +1047,7 @@ exports.getBills = async (req, res) => {
           { name: { $regex: activeGivenTo, $options: 'i' } },
           { username: { $regex: activeGivenTo, $options: 'i' } }
         ]
-      }).select('_id');
+      }).select('_id').lean();
       const staffIds = matchingStaff.map(u => u._id);
 
       const givenToOr = [
@@ -1081,8 +1081,12 @@ exports.getBills = async (req, res) => {
       ];
     }
 
-    const skip = (page - 1) * limit;
-    const bills = await Bill.find(query)
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(1000, Math.max(1, parseInt(limit, 10) || 100));
+    const skip = (pageNum - 1) * limitNum;
+
+    // 1. Fetch paginated bills with index
+    const billsPromise = Bill.find(query)
       .populate('table', 'tableNumber name capacity')
       .populate('session', 'sessionId startTime')
       .populate('orders', 'orderId status total')
@@ -1090,17 +1094,48 @@ exports.getBills = async (req, res) => {
       .populate('ncEmployee', 'name role username')
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(Number(limit))
+      .limit(limitNum)
       .lean();
 
-    const total = await Bill.countDocuments(query);
+    // 2. Count total documents (fast metadata count when query is empty)
+    const countPromise = Object.keys(query).length === 0
+      ? Bill.estimatedDocumentCount()
+      : Bill.countDocuments(query);
 
-    // Compute Summary Stats for NC & Discounts
-    const allMatchingBills = await Bill.find(query)
-      .select('paymentStatus isNonChargeableBill items subtotal billDiscountAmount discountGivenBy ncStaffRemark ncGivenBy ncGivenTo createdAt ncEmployee customer')
-      .populate('ncEmployee', 'name username')
-      .lean();
-    
+    // 3. Optimized Summary Stats:
+    // Only query if summary is not explicitly turned off (e.g. summary=false)
+    // AND query ONLY bills that actually have NC or discounts instead of scanning entire collection!
+    const shouldComputeSummary = req.query.summary !== 'false' && req.query.includeSummary !== 'false';
+
+    let statsPromise = null;
+    if (shouldComputeSummary) {
+      const ncOrDiscountFilter = {
+        $or: [
+          { paymentStatus: 'Non-Chargeable' },
+          { isNonChargeableBill: true },
+          { billDiscountAmount: { $gt: 0 } }
+        ]
+      };
+
+      const statsQuery = Object.keys(query).length === 0
+        ? ncOrDiscountFilter
+        : { $and: [query, ncOrDiscountFilter] };
+
+      statsPromise = Bill.find(statsQuery)
+        .select('paymentStatus isNonChargeableBill items.unitPrice items.quantity subtotal billDiscountAmount discountGivenBy ncStaffRemark ncGivenBy ncGivenTo createdAt ncEmployee customer.name')
+        .populate('ncEmployee', 'name username')
+        .lean();
+    } else {
+      statsPromise = Promise.resolve([]);
+    }
+
+    // Run queries in parallel
+    const [bills, total, allMatchingBills] = await Promise.all([
+      billsPromise,
+      countPromise,
+      statsPromise
+    ]);
+
     let totalNcCount = 0;
     let totalNcWaivedAmount = 0;
     let totalDiscountAmount = 0;
@@ -1109,35 +1144,38 @@ exports.getBills = async (req, res) => {
     const ncGivenByMap = {};
     const ncGivenToMap = {};
 
-    allMatchingBills.forEach(b => {
-      const isNC = b.paymentStatus === 'Non-Chargeable' || b.isNonChargeableBill;
-      if (isNC) {
-        totalNcCount++;
-        // Calculate original order value waived
-        const origSub = (b.items || []).reduce((sum, i) => sum + ((i.unitPrice || 0) * (i.quantity || 1)), 0);
-        const waived = origSub || b.subtotal || 0;
-        totalNcWaivedAmount += waived;
+    if (shouldComputeSummary && Array.isArray(allMatchingBills)) {
+      for (let i = 0; i < allMatchingBills.length; i++) {
+        const b = allMatchingBills[i];
+        const isNC = b.paymentStatus === 'Non-Chargeable' || b.isNonChargeableBill;
+        if (isNC) {
+          totalNcCount++;
+          // Calculate original order value waived
+          const origSub = (b.items || []).reduce((sum, itm) => sum + ((itm.unitPrice || 0) * (itm.quantity || 1)), 0);
+          const waived = origSub || b.subtotal || 0;
+          totalNcWaivedAmount += waived;
 
-        // NC Given By resolution
-        const giverName = (b.ncGivenBy || b.discountGivenBy || b.ncEmployee?.name || b.ncEmployee?.username || '').trim();
-        if (giverName) {
-          ncGivenByMap[giverName] = (ncGivenByMap[giverName] || 0) + waived;
+          // NC Given By resolution
+          const giverName = (b.ncGivenBy || b.discountGivenBy || b.ncEmployee?.name || b.ncEmployee?.username || '').trim();
+          if (giverName) {
+            ncGivenByMap[giverName] = (ncGivenByMap[giverName] || 0) + waived;
+          }
+
+          // NC Given To resolution
+          const recipientName = (b.ncGivenTo || b.ncStaffRemark || b.customer?.name || '').trim();
+          if (recipientName) {
+            ncGivenToMap[recipientName] = (ncGivenToMap[recipientName] || 0) + waived;
+          }
         }
 
-        // NC Given To resolution
-        const recipientName = (b.ncGivenTo || b.ncStaffRemark || b.customer?.name || '').trim();
-        if (recipientName) {
-          ncGivenToMap[recipientName] = (ncGivenToMap[recipientName] || 0) + waived;
+        if (b.billDiscountAmount > 0) {
+          discountedBillsCount++;
+          totalDiscountAmount += b.billDiscountAmount;
+          const giver = b.discountGivenBy || 'Staff';
+          givenByMap[giver] = (givenByMap[giver] || 0) + b.billDiscountAmount;
         }
       }
-
-      if (b.billDiscountAmount > 0) {
-        discountedBillsCount++;
-        totalDiscountAmount += b.billDiscountAmount;
-        const giver = b.discountGivenBy || 'Staff';
-        givenByMap[giver] = (givenByMap[giver] || 0) + b.billDiscountAmount;
-      }
-    });
+    }
 
     return res.json({
       success: true,
@@ -1154,8 +1192,8 @@ exports.getBills = async (req, res) => {
       },
       pagination: {
         total,
-        page: Number(page),
-        pages: Math.ceil(total / limit)
+        page: pageNum,
+        pages: Math.ceil(total / limitNum)
       }
     });
   } catch (error) {
