@@ -105,6 +105,8 @@ const billSchema = new mongoose.Schema({
   isNonChargeableBill: { type: Boolean, default: false },
   ncStaffRemark: String,
   ncEmployee: { type: mongoose.Schema.ObjectId, ref: 'User' },
+  ncGivenBy: { type: String, default: '', index: true },
+  ncGivenTo: { type: String, default: '', index: true },
   
   taxableAmountGST: { type: Number, default: 0 },
   taxableAmountVAT: { type: Number, default: 0 },
@@ -238,5 +240,12 @@ billSchema.pre('save', async function (next) {
   }
   next();
 });
+
+billSchema.index({ createdAt: -1 });
+billSchema.index({ status: 1, createdAt: -1 });
+billSchema.index({ paymentStatus: 1, createdAt: -1 });
+billSchema.index({ isNonChargeableBill: 1, createdAt: -1 });
+billSchema.index({ isNonChargeableBill: 1, ncGivenBy: 1, createdAt: -1 });
+billSchema.index({ isNonChargeableBill: 1, ncGivenTo: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Bill', billSchema);

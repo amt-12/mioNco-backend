@@ -339,7 +339,7 @@ const calculateBillTotals = async (rawItems, options = {}) => {
 };
 
 // Helper to synchronize an active, non-split bill with its order(s)
-const syncBillWithOrders = async (billIdOrDoc) => {
+const syncBillWithOrders = async (billIdOrDoc, options = {}) => {
   try {
     const billId = billIdOrDoc?._id || billIdOrDoc;
     if (!billId) return billIdOrDoc;
@@ -376,13 +376,15 @@ const syncBillWithOrders = async (billIdOrDoc) => {
       billDoc.finalAmount = 0;
       billDoc.balanceDue = 0;
       await billDoc.save();
-      try {
-        const io = global.io;
-        if (io) {
-          io.emit('bill_updated', billDoc);
-          io.emit('billing_updated');
-        }
-      } catch (e) {}
+      if (!options?.silent) {
+        try {
+          const io = global.io;
+          if (io) {
+            io.emit('bill_updated', billDoc);
+            io.emit('billing_updated');
+          }
+        } catch (e) {}
+      }
       return billDoc;
     }
 
@@ -483,13 +485,15 @@ const syncBillWithOrders = async (billIdOrDoc) => {
       .populate('orders')
       .populate('createdBy', 'name role');
 
-    try {
-      const io = global.io;
-      if (io) {
-        io.emit('bill_updated', populatedBill);
-        io.emit('billing_updated');
-      }
-    } catch (sockErr) {}
+    if (!options?.silent) {
+      try {
+        const io = global.io;
+        if (io) {
+          io.emit('bill_updated', populatedBill);
+          io.emit('billing_updated');
+        }
+      } catch (sockErr) {}
+    }
 
     return populatedBill;
   } catch (err) {
@@ -528,9 +532,9 @@ const resolveBillObject = async (idParam) => {
   }
 
   if (b) {
-    // Auto-sync active non-split bill with order items
+    // Auto-sync active non-split bill with order items (silent: do not broadcast during resolve)
     if (b.status === 'Active' && b.paymentStatus !== 'Paid' && !b.splitInfo?.isSplit) {
-      b = await syncBillWithOrders(b._id);
+      b = await syncBillWithOrders(b._id, { silent: true });
     }
 
     // If existing bill has a generic BILL- prefix but floor is Bistro or known floor, auto-correct it
@@ -869,7 +873,26 @@ exports.generateBill = async (req, res) => {
 // @access  Private
 exports.getBills = async (req, res) => {
   try {
-    const { status, paymentStatus, search, page = 1, limit = 100, table, order, session, isSplit, period, date, startDate, endDate, timezoneOffset, givenBy } = req.query;
+    const { 
+      status, 
+      paymentStatus, 
+      search, 
+      page = 1, 
+      limit = 100, 
+      table, 
+      order, 
+      session, 
+      isSplit, 
+      period, 
+      date, 
+      startDate, 
+      endDate, 
+      timezoneOffset, 
+      givenBy, 
+      givenTo,
+      ncGivenBy, 
+      ncGivenTo 
+    } = req.query;
 
     const query = {};
     if (status && status !== 'ALL') {
@@ -992,13 +1015,52 @@ exports.getBills = async (req, res) => {
       }
     }
 
-    if (givenBy) {
-      andConditions.push({
+    const activeGivenBy = ncGivenBy || givenBy;
+    if (activeGivenBy) {
+      const User = require('../models/User');
+      const matchingStaff = await User.find({
         $or: [
-          { discountGivenBy: { $regex: givenBy, $options: 'i' } },
-          { ncStaffRemark: { $regex: givenBy, $options: 'i' } }
+          { name: { $regex: activeGivenBy, $options: 'i' } },
+          { username: { $regex: activeGivenBy, $options: 'i' } }
         ]
-      });
+      }).select('_id');
+      const staffIds = matchingStaff.map(u => u._id);
+
+      const givenByOr = [
+        { ncGivenBy: { $regex: activeGivenBy, $options: 'i' } },
+        { discountGivenBy: { $regex: activeGivenBy, $options: 'i' } }
+      ];
+
+      if (staffIds.length > 0) {
+        givenByOr.push({ ncEmployee: { $in: staffIds } });
+        givenByOr.push({ createdBy: { $in: staffIds } });
+      }
+
+      andConditions.push({ $or: givenByOr });
+    }
+
+    const activeGivenTo = ncGivenTo || givenTo;
+    if (activeGivenTo) {
+      const User = require('../models/User');
+      const matchingStaff = await User.find({
+        $or: [
+          { name: { $regex: activeGivenTo, $options: 'i' } },
+          { username: { $regex: activeGivenTo, $options: 'i' } }
+        ]
+      }).select('_id');
+      const staffIds = matchingStaff.map(u => u._id);
+
+      const givenToOr = [
+        { ncGivenTo: { $regex: activeGivenTo, $options: 'i' } },
+        { ncStaffRemark: { $regex: activeGivenTo, $options: 'i' } },
+        { 'customer.name': { $regex: activeGivenTo, $options: 'i' } }
+      ];
+
+      if (staffIds.length > 0) {
+        givenToOr.push({ ncEmployee: { $in: staffIds } });
+      }
+
+      andConditions.push({ $or: givenToOr });
     }
 
     if (andConditions.length > 0) {
@@ -1013,7 +1075,9 @@ exports.getBills = async (req, res) => {
         { 'customer.phone': searchRegex },
         { discountGivenBy: searchRegex },
         { billDiscountReason: searchRegex },
-        { ncStaffRemark: searchRegex }
+        { ncStaffRemark: searchRegex },
+        { ncGivenBy: searchRegex },
+        { ncGivenTo: searchRegex }
       ];
     }
 
@@ -1021,46 +1085,50 @@ exports.getBills = async (req, res) => {
     const bills = await Bill.find(query)
       .populate('table', 'tableNumber name capacity')
       .populate('session', 'sessionId startTime')
-      .populate('orders', 'orderId items status subtotal total')
+      .populate('orders', 'orderId status total')
       .populate('createdBy', 'name role')
       .populate('ncEmployee', 'name role username')
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(Number(limit));
-
-    // Auto-sync any active non-split bills whose items might be out of date with their orders
-    if (query.status === 'Active' || query.status === undefined) {
-      for (let i = 0; i < bills.length; i++) {
-        const b = bills[i];
-        if (b && b.status === 'Active' && !b.splitInfo?.isSplit && b.paymentStatus !== 'Paid' && b.orders && b.orders.length > 0) {
-          const totalActiveOrderItems = b.orders.reduce((acc, ord) => {
-            return acc + (ord.items || []).filter(item => item.status !== 'Cancelled' && item.status !== 'Void' && item.status !== 'Voided' && !item.isSpoiled).length;
-          }, 0);
-          if (totalActiveOrderItems !== (b.items?.length || 0)) {
-            const synced = await syncBillWithOrders(b._id);
-            if (synced) bills[i] = synced;
-          }
-        }
-      }
-    }
+      .limit(Number(limit))
+      .lean();
 
     const total = await Bill.countDocuments(query);
 
     // Compute Summary Stats for NC & Discounts
-    const allMatchingBills = await Bill.find(query).select('paymentStatus isNonChargeableBill items subtotal billDiscountAmount discountGivenBy ncStaffRemark createdAt');
+    const allMatchingBills = await Bill.find(query)
+      .select('paymentStatus isNonChargeableBill items subtotal billDiscountAmount discountGivenBy ncStaffRemark ncGivenBy ncGivenTo createdAt ncEmployee customer')
+      .populate('ncEmployee', 'name username')
+      .lean();
     
     let totalNcCount = 0;
     let totalNcWaivedAmount = 0;
     let totalDiscountAmount = 0;
     let discountedBillsCount = 0;
     const givenByMap = {};
+    const ncGivenByMap = {};
+    const ncGivenToMap = {};
 
     allMatchingBills.forEach(b => {
-      if (b.paymentStatus === 'Non-Chargeable' || b.isNonChargeableBill) {
+      const isNC = b.paymentStatus === 'Non-Chargeable' || b.isNonChargeableBill;
+      if (isNC) {
         totalNcCount++;
         // Calculate original order value waived
-        const origSub = (b.items || []).reduce((sum, i) => sum + (i.unitPrice * (i.quantity || 1)), 0);
-        totalNcWaivedAmount += (origSub || b.subtotal || 0);
+        const origSub = (b.items || []).reduce((sum, i) => sum + ((i.unitPrice || 0) * (i.quantity || 1)), 0);
+        const waived = origSub || b.subtotal || 0;
+        totalNcWaivedAmount += waived;
+
+        // NC Given By resolution
+        const giverName = (b.ncGivenBy || b.discountGivenBy || b.ncEmployee?.name || b.ncEmployee?.username || '').trim();
+        if (giverName) {
+          ncGivenByMap[giverName] = (ncGivenByMap[giverName] || 0) + waived;
+        }
+
+        // NC Given To resolution
+        const recipientName = (b.ncGivenTo || b.ncStaffRemark || b.customer?.name || '').trim();
+        if (recipientName) {
+          ncGivenToMap[recipientName] = (ncGivenToMap[recipientName] || 0) + waived;
+        }
       }
 
       if (b.billDiscountAmount > 0) {
@@ -1079,7 +1147,10 @@ exports.getBills = async (req, res) => {
         totalNcWaivedAmount,
         totalDiscountAmount,
         discountedBillsCount,
-        givenBySummary: givenByMap
+        givenBySummary: givenByMap,
+        ncGivenBySummary: ncGivenByMap,
+        ncGivenToSummary: ncGivenToMap,
+        ncPersonSummary: { ...ncGivenToMap, ...ncGivenByMap }
       },
       pagination: {
         total,
@@ -1717,6 +1788,131 @@ exports.applyDiscount = async (req, res) => {
     if (parentId && !bill.isNew) {
       const splits = await Bill.find({ $or: [{ 'splitInfo.parentBill': parentId }, { _id: parentId }], status: { $ne: 'Cancelled' } });
       if (splits && splits.length > 0) siblingBills = splits;
+    }
+
+    if (discountType === 'Non-Chargeable') {
+      const ncGiver = (req.body.ncGivenBy || discountGivenBy || '').trim();
+      const ncRecipient = (req.body.ncGivenTo || '').trim();
+
+      if (!ncGiver) {
+        return res.status(400).json({ success: false, message: 'Please select or type who authorized this (Given By is required)' });
+      }
+      if (!ncRecipient) {
+        return res.status(400).json({ success: false, message: 'Please enter who this NC bill is given to (Given To is required)' });
+      }
+
+      const ncRemark = discountReason || req.body.ncStaffRemark || 'Non-Chargeable';
+      const rawNcEmp = req.body.employeeId || req.body.ncEmployee || null;
+      let validEmpId = null;
+      if (rawNcEmp) {
+        if (mongoose.Types.ObjectId.isValid(rawNcEmp)) {
+          validEmpId = rawNcEmp;
+        } else {
+          try {
+            const User = require('../models/User');
+            const foundUser = await User.findOne({
+              $or: [
+                { name: new RegExp(`^${rawNcEmp}$`, 'i') },
+                { username: new RegExp(`^${rawNcEmp}$`, 'i') }
+              ]
+            });
+            if (foundUser) validEmpId = foundUser._id;
+          } catch (e) {}
+        }
+      }
+
+      const allOrderIds = [];
+
+      for (const sBill of siblingBills) {
+        (sBill.orders || []).forEach(o => {
+          const oId = o?._id || o;
+          if (oId) allOrderIds.push(oId);
+        });
+
+        const billDoc = await Bill.findById(sBill._id);
+        if (billDoc) {
+          billDoc.isNonChargeableBill = true;
+          billDoc.paymentStatus = 'Non-Chargeable';
+          billDoc.status = req.body.settleImmediately ? 'Settled' : 'Active';
+          billDoc.billDiscountType = 'Non-Chargeable';
+          billDoc.billDiscountReason = ncRemark;
+          billDoc.discountGivenBy = ncGiver;
+          billDoc.ncGivenBy = ncGiver;
+          billDoc.ncGivenTo = ncRecipient;
+          billDoc.ncStaffRemark = ncRemark;
+          if (validEmpId) {
+            billDoc.ncEmployee = validEmpId;
+          } else {
+            billDoc.ncEmployee = undefined;
+          }
+          billDoc.subtotal = 0;
+          billDoc.cgstAmount = 0;
+          billDoc.sgstAmount = 0;
+          billDoc.vatAmount = 0;
+          billDoc.totalTaxAmount = 0;
+          billDoc.serviceChargeAmount = 0;
+          billDoc.finalAmount = 0;
+          billDoc.balanceDue = 0;
+          billDoc.amountPaid = 0;
+
+          if (billDoc.items && billDoc.items.length > 0) {
+            billDoc.items.forEach(it => {
+              it.isNonChargeable = true;
+              it.totalPrice = 0;
+              it.ncRemark = ncRemark;
+            });
+          }
+
+          if (!billDoc.payments) billDoc.payments = [];
+          if (!billDoc.payments.some(p => p.mode === 'NC' || p.mode === 'Non-Chargeable')) {
+            billDoc.payments.push({
+              mode: 'NC',
+              amount: 0,
+              txnId: `NC-${ncGiver || 'ADMIN'}`,
+              timestamp: new Date()
+            });
+          }
+
+          await billDoc.save();
+        }
+      }
+
+      // Update associated Order documents to Non-Chargeable & Completed
+      if (allOrderIds.length > 0) {
+        await Order.updateMany(
+          { _id: { $in: allOrderIds } },
+          { paymentStatus: 'Non-Chargeable', paymentMethod: 'NC', status: 'Completed' }
+        );
+      }
+
+      const freshBill = await Bill.findById(bill._id)
+        .populate('table')
+        .populate('orders')
+        .populate('ncEmployee', 'name role username');
+      const responseData = siblingBills.length > 1 ? siblingBills : (freshBill || bill);
+
+      const io = req.app.get('io') || req.app.get('socketio') || global.io;
+      if (io) {
+        io.emit('bill_updated', {
+          billId: bill._id,
+          table: bill.table,
+          paymentStatus: 'Non-Chargeable',
+          status: 'Settled',
+          finalAmount: 0
+        });
+        io.emit('billing_updated');
+        allOrderIds.forEach(oId => {
+          io.emit('order_status_updated', {
+            _id: oId,
+            paymentStatus: 'Non-Chargeable',
+            paymentMethod: 'NC',
+            status: 'Completed',
+            table: bill.table
+          });
+        });
+      }
+
+      return res.json({ success: true, message: 'Non-Chargeable status applied successfully', data: responseData });
     }
 
     const combinedSubtotal = siblingBills.reduce((sum, b) => sum + (b.subtotal || 0), 0);
@@ -2437,11 +2633,23 @@ exports.recordPayment = async (req, res) => {
     bill.amountPaid += addedTotal;
     bill.balanceDue = Math.max(0, bill.finalAmount - bill.amountPaid);
 
-    const isNcPayment = (payments && payments.some(p => p.mode === 'NC')) || billData?.isNonChargeableBill;
+    const isNcPayment = (payments && payments.some(p => p.mode === 'NC' || p.mode === 'Non-Chargeable')) || billData?.isNonChargeableBill || bill.isNonChargeableBill || bill.paymentStatus === 'Non-Chargeable';
     const isHoldPayment = (payments && payments.some(p => p.mode === 'Hold')) || billData?.isHold || req.body?.isHold || req.body?.paymentMode === 'Hold';
 
     if (isNcPayment) {
+      const ncGiver = (billData?.ncGivenBy || req.body?.ncGivenBy || billData?.discountGivenBy || bill.ncGivenBy || bill.discountGivenBy || '').trim();
+      const ncRecipient = (billData?.ncGivenTo || req.body?.ncGivenTo || bill.ncGivenTo || '').trim();
+
+      if (!ncGiver) {
+        return res.status(400).json({ success: false, message: 'Please select or type who authorized this (Given By is required)' });
+      }
+      if (!ncRecipient) {
+        return res.status(400).json({ success: false, message: 'Please enter who this NC bill is given to (Given To is required)' });
+      }
+
       bill.isNonChargeableBill = true;
+      bill.ncGivenBy = ncGiver;
+      bill.ncGivenTo = ncRecipient;
       bill.ncStaffRemark = billData?.ncStaffRemark || billData?.remark || 'Non-Chargeable';
       if (billData?.ncEmployee || billData?.employeeId) {
         bill.ncEmployee = billData.ncEmployee || billData.employeeId;
@@ -2527,6 +2735,16 @@ exports.recordPayment = async (req, res) => {
             { status: 'Available', currentSession: null },
             { new: true }
           );
+          try {
+            await DiningSession.updateMany(
+              { table: tId, status: { $ne: 'Completed' } },
+              { status: 'Completed', paymentStatus: bill.paymentStatus === 'Hold' ? 'Hold' : 'Paid', endTime: new Date() }
+            );
+            await Order.updateMany(
+              { table: tId, status: { $nin: ['Completed', 'Cancelled'] } },
+              { status: 'Completed', paymentStatus: bill.paymentStatus === 'Hold' ? 'Hold' : (bill.paymentStatus === 'Non-Chargeable' ? 'Non-Chargeable' : 'Paid') }
+            );
+          } catch (sessionErr) {}
           if (io && updatedTable) {
             io.emit('table_status_changed', updatedTable);
             io.emit('table_status_updated', updatedTable);
