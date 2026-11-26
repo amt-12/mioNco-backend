@@ -18,6 +18,7 @@ const {
   getBillingAnalytics,
   getDailySalesReport,
   getLiquorSalesReport,
+  getMostOrderedItems,
   deleteBill,
   syncBill
 } = require('../controllers/billingController');
@@ -30,6 +31,7 @@ router.use(protect);
 
 router.get('/daily-sales-report', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getDailySalesReport);
 router.get('/liquor-sales', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getLiquorSalesReport);
+router.get('/most-ordered-items', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getMostOrderedItems);
 router.post('/generate', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), generateBill);
 router.get('/', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter', 'Receptionist'), getBills);
 router.get('/analytics/summary', authorize('Super Admin', 'super_admin', 'admin', 'Restaurant Manager', 'Waiter'), getBillingAnalytics);

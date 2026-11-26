@@ -4355,6 +4355,343 @@ exports.getLiquorSalesReport = async (req, res) => {
   }
 };
 
+// @desc    Get Most Ordered Food Items Report (Ranked Sales & Revenue)
+// @route   GET /api/v1/billing/most-ordered-items
+// @access  Private
+exports.getMostOrderedItems = async (req, res) => {
+  try {
+    const { 
+      timeframe = 'all', 
+      startDate, 
+      endDate, 
+      date, 
+      itemType = 'all', // 'Food' | 'Liquor' | 'all'
+      section, 
+      search, 
+      sortBy = 'quantity', // 'quantity' | 'revenue'
+      sortOrder = 'desc',
+      timezoneOffset 
+    } = req.query;
+
+    const tzOffsetMinutes = timezoneOffset !== undefined && !isNaN(Number(timezoneOffset)) 
+      ? Number(timezoneOffset) 
+      : -330;
+    const tzOffsetMs = tzOffsetMinutes * 60 * 1000;
+
+    const now = new Date();
+    const localNow = new Date(now.getTime() - tzOffsetMs);
+    const todayY = localNow.getUTCFullYear();
+    const todayM = localNow.getUTCMonth() + 1;
+    const todayD = localNow.getUTCDate();
+    const todayDateStr = `${todayY}-${String(todayM).padStart(2, '0')}-${String(todayD).padStart(2, '0')}`;
+
+    let start = null;
+    let end = null;
+    let periodLabel = 'All Time';
+
+    if (startDate && endDate) {
+      const sParts = String(startDate).split('-');
+      const eParts = String(endDate).split('-');
+      if (sParts.length === 3 && eParts.length === 3) {
+        const [sY, sM, sD] = sParts.map(Number);
+        const [eY, eM, eD] = eParts.map(Number);
+        start = new Date(Date.UTC(sY, sM - 1, sD, 0, 0, 0, 0) + tzOffsetMs);
+        end = new Date(Date.UTC(eY, eM - 1, eD, 23, 59, 59, 999) + tzOffsetMs);
+      } else {
+        start = new Date(startDate);
+        start.setHours(0, 0, 0, 0);
+        end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+      }
+      periodLabel = `${startDate} to ${endDate}`;
+    } else if (date) {
+      const parts = String(date).split('-');
+      if (parts.length === 3) {
+        const [y, m, d] = parts.map(Number);
+        start = new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0) + tzOffsetMs);
+        end = new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999) + tzOffsetMs);
+      } else {
+        start = new Date(date);
+        start.setHours(0, 0, 0, 0);
+        end = new Date(date);
+        end.setHours(23, 59, 59, 999);
+      }
+      periodLabel = date;
+    } else if (timeframe === 'today') {
+      start = new Date(Date.UTC(todayY, todayM - 1, todayD, 0, 0, 0, 0) + tzOffsetMs);
+      end = new Date(Date.UTC(todayY, todayM - 1, todayD, 23, 59, 59, 999) + tzOffsetMs);
+      periodLabel = 'Today';
+    } else if (timeframe === 'yesterday') {
+      const yDate = new Date(Date.UTC(todayY, todayM - 1, todayD - 1, 0, 0, 0, 0) + tzOffsetMs);
+      const yDateEnd = new Date(Date.UTC(todayY, todayM - 1, todayD - 1, 23, 59, 59, 999) + tzOffsetMs);
+      start = yDate;
+      end = yDateEnd;
+      periodLabel = 'Yesterday';
+    } else if (timeframe === 'week' || timeframe === 'last7') {
+      start = new Date(Date.UTC(todayY, todayM - 1, todayD - 6, 0, 0, 0, 0) + tzOffsetMs);
+      end = new Date(Date.UTC(todayY, todayM - 1, todayD, 23, 59, 59, 999) + tzOffsetMs);
+      periodLabel = 'Last 7 Days';
+    } else if (timeframe === 'month' || timeframe === 'thisMonth') {
+      const lastDay = new Date(Date.UTC(todayY, todayM, 0)).getUTCDate();
+      start = new Date(Date.UTC(todayY, todayM - 1, 1, 0, 0, 0, 0) + tzOffsetMs);
+      end = new Date(Date.UTC(todayY, todayM - 1, lastDay, 23, 59, 59, 999) + tzOffsetMs);
+      periodLabel = 'This Month';
+    } else if (timeframe === 'last30') {
+      start = new Date(Date.UTC(todayY, todayM - 1, todayD - 29, 0, 0, 0, 0) + tzOffsetMs);
+      end = new Date(Date.UTC(todayY, todayM - 1, todayD, 23, 59, 59, 999) + tzOffsetMs);
+      periodLabel = 'Last 30 Days';
+    } else {
+      periodLabel = 'All Time';
+    }
+
+    const billQuery = {
+      status: { $nin: ['Voided', 'Cancelled', 'Merged'] },
+      paymentStatus: { $nin: ['Voided', 'Cancelled', 'Merged'] },
+      billNumber: { $nin: ['BIS-1EY98E', 'BIS-BFD700'] }
+    };
+
+    if (start && end) {
+      const BusinessDay = require('../models/BusinessDay');
+      const startDateStr = start.toISOString().split('T')[0];
+      const endDateStr = end.toISOString().split('T')[0];
+      let shiftWindowStart = start;
+      let shiftWindowEnd = end;
+
+      const targetBusinessDays = await BusinessDay.find({
+        $or: [
+          { businessDate: { $gte: startDateStr, $lte: endDateStr } },
+          { startTime: { $gte: start, $lte: end } }
+        ]
+      }).select('_id startTime endTime status updatedAt').lean();
+
+      let targetDayIds = [];
+      if (targetBusinessDays.length > 0) {
+        targetDayIds = targetBusinessDays.map(b => b._id);
+        targetBusinessDays.forEach(b => {
+          if (b.startTime && b.startTime < shiftWindowStart) shiftWindowStart = b.startTime;
+          const bEnd = b.endTime || (b.status === 'Open' ? new Date() : b.updatedAt);
+          if (bEnd && bEnd > shiftWindowEnd) shiftWindowEnd = bEnd;
+        });
+      }
+
+      billQuery.$or = [
+        { businessDate: { $gte: startDateStr, $lte: endDateStr } },
+        ...(targetDayIds.length > 0 ? [{ businessDay: { $in: targetDayIds } }] : []),
+        { createdAt: { $gte: shiftWindowStart, $lte: shiftWindowEnd } }
+      ];
+    }
+
+    // Fetch bills with lean to optimize speed
+    const bills = await Bill.find(billQuery)
+      .select('billNumber items paymentStatus status isNonChargeableBill isComplimentaryBill createdAt businessDate')
+      .lean();
+
+    // Cache menu items for accurate metadata (section name, foodType, dishType)
+    const MenuItem = require('../models/MenuItem');
+    const menuItems = await MenuItem.find({}).populate('section', 'name').lean();
+    const menuItemMap = new Map();
+    menuItems.forEach(m => {
+      menuItemMap.set(String(m._id), m);
+      if (m.foodName) {
+        menuItemMap.set(m.foodName.trim().toLowerCase(), m);
+      }
+    });
+
+    const itemMap = {};
+    const categoryMap = {};
+    let totalFoodQtyAll = 0;
+    let totalFoodRevAll = 0;
+    let totalLiquorQtyAll = 0;
+    let totalLiquorRevAll = 0;
+    let totalCombinedQty = 0;
+    let totalCombinedRev = 0;
+
+    bills.forEach(bill => {
+      const isNCBill = bill.isNonChargeableBill || bill.isComplimentaryBill || bill.paymentStatus === 'Non-Chargeable';
+
+      (bill.items || []).forEach(item => {
+        if (item.isSpoiled) return;
+
+        const rawType = String(item.itemType || '').trim().toLowerCase();
+        const isLiquor = rawType === 'liquor' || isLiquorItem(item);
+        const resolvedType = isLiquor ? 'Liquor' : 'Food';
+
+        const menuDoc = (item.menuItem && menuItemMap.get(String(item.menuItem))) || 
+                        menuItemMap.get(String(item.foodName || '').trim().toLowerCase());
+
+        const foodName = (item.foodName || menuDoc?.foodName || 'Unnamed Item').trim();
+        const sectionName = item.sectionName || menuDoc?.section?.name || menuDoc?.dishType || (isLiquor ? 'Liquor' : 'Main Menu');
+        const qty = Number(item.quantity) || 1;
+        const unitPrice = Number(item.unitPrice) || (Number(item.totalPrice) / (qty || 1)) || 0;
+        const totalPrice = Number(item.totalPrice) > 0 ? Number(item.totalPrice) : (unitPrice * qty);
+
+        if (resolvedType === 'Food') {
+          totalFoodQtyAll += qty;
+          totalFoodRevAll += totalPrice;
+        } else {
+          totalLiquorQtyAll += qty;
+          totalLiquorRevAll += totalPrice;
+        }
+        totalCombinedQty += qty;
+        totalCombinedRev += totalPrice;
+
+        const mapKey = `${resolvedType}___${foodName.toLowerCase()}`;
+        if (!itemMap[mapKey]) {
+          itemMap[mapKey] = {
+            id: mapKey,
+            foodName,
+            itemType: resolvedType,
+            sectionName,
+            dishType: menuDoc?.dishType || '',
+            cuisineType: menuDoc?.cuisineType || '',
+            totalQuantity: 0,
+            totalRevenue: 0,
+            unitPrice: unitPrice > 0 ? unitPrice : (menuDoc?.price || 0),
+            priceSamples: [],
+            ncCount: 0,
+            billNumbers: new Set(),
+            variants: {}
+          };
+        }
+
+        const entry = itemMap[mapKey];
+        entry.totalQuantity += qty;
+        entry.totalRevenue += totalPrice;
+        if (unitPrice > 0) entry.priceSamples.push(unitPrice);
+        if (isNCBill || item.isComplimentary || item.isNonChargeable) {
+          entry.ncCount += qty;
+        }
+        if (item.variantName) {
+          entry.variants[item.variantName] = (entry.variants[item.variantName] || 0) + qty;
+        }
+        entry.billNumbers.add(bill.billNumber);
+
+        // Category breakdown
+        if (!categoryMap[sectionName]) {
+          categoryMap[sectionName] = {
+            sectionName,
+            itemType: resolvedType,
+            totalQuantity: 0,
+            totalRevenue: 0,
+            itemsCount: new Set()
+          };
+        }
+        categoryMap[sectionName].totalQuantity += qty;
+        categoryMap[sectionName].totalRevenue += totalPrice;
+        categoryMap[sectionName].itemsCount.add(foodName);
+      });
+    });
+
+    let allAggregated = Object.values(itemMap).map(item => {
+      const avgPrice = item.priceSamples.length > 0 
+        ? item.priceSamples.reduce((a, b) => a + b, 0) / item.priceSamples.length 
+        : item.unitPrice;
+
+      const typeQtyTotal = item.itemType === 'Food' ? totalFoodQtyAll : totalLiquorQtyAll;
+      const typeRevTotal = item.itemType === 'Food' ? totalFoodRevAll : totalLiquorRevAll;
+
+      return {
+        id: item.id,
+        foodName: item.foodName,
+        itemType: item.itemType,
+        sectionName: item.sectionName,
+        dishType: item.dishType,
+        cuisineType: item.cuisineType,
+        totalQuantity: item.totalQuantity,
+        totalRevenue: Number(item.totalRevenue.toFixed(2)),
+        averagePrice: Number(avgPrice.toFixed(2)),
+        billsCount: item.billNumbers.size,
+        ncCount: item.ncCount,
+        variants: item.variants,
+        shareOfVolume: typeQtyTotal > 0 ? Number(((item.totalQuantity / typeQtyTotal) * 100).toFixed(2)) : 0,
+        shareOfRevenue: typeRevTotal > 0 ? Number(((item.totalRevenue / typeRevTotal) * 100).toFixed(2)) : 0,
+        overallShareOfVolume: totalCombinedQty > 0 ? Number(((item.totalQuantity / totalCombinedQty) * 100).toFixed(2)) : 0
+      };
+    });
+
+    // Filtering
+    if (itemType && itemType !== 'all') {
+      allAggregated = allAggregated.filter(i => i.itemType.toLowerCase() === itemType.toLowerCase());
+    }
+    if (section && section !== 'ALL') {
+      allAggregated = allAggregated.filter(i => i.sectionName.toLowerCase() === section.toLowerCase());
+    }
+    if (search && search.trim()) {
+      const s = search.trim().toLowerCase();
+      allAggregated = allAggregated.filter(i => 
+        i.foodName.toLowerCase().includes(s) || 
+        i.sectionName.toLowerCase().includes(s) ||
+        (i.dishType && i.dishType.toLowerCase().includes(s))
+      );
+    }
+
+    // Sorting
+    allAggregated.sort((a, b) => {
+      let valA = sortBy === 'revenue' ? a.totalRevenue : a.totalQuantity;
+      let valB = sortBy === 'revenue' ? b.totalRevenue : b.totalQuantity;
+      if (sortOrder === 'asc') return valA - valB;
+      return valB - valA;
+    });
+
+    // Assign ranking
+    const rankedItems = allAggregated.map((item, index) => ({
+      rank: index + 1,
+      ...item
+    }));
+
+    // Find top performers for summary KPIs
+    const foodOnly = Object.values(itemMap).filter(i => i.itemType === 'Food');
+    foodOnly.sort((a, b) => b.totalQuantity - a.totalQuantity);
+    const topFoodDish = foodOnly[0] ? {
+      name: foodOnly[0].foodName,
+      quantity: foodOnly[0].totalQuantity,
+      revenue: Number(foodOnly[0].totalRevenue.toFixed(2)),
+      sectionName: foodOnly[0].sectionName
+    } : null;
+
+    const foodByRevenue = [...foodOnly].sort((a, b) => b.totalRevenue - a.totalRevenue);
+    const topFoodRevenueDish = foodByRevenue[0] ? {
+      name: foodByRevenue[0].foodName,
+      quantity: foodByRevenue[0].totalQuantity,
+      revenue: Number(foodByRevenue[0].totalRevenue.toFixed(2)),
+      sectionName: foodByRevenue[0].sectionName
+    } : null;
+
+    // Categories array
+    const categoriesArray = Object.values(categoryMap).map(c => ({
+      sectionName: c.sectionName,
+      itemType: c.itemType,
+      totalQuantity: c.totalQuantity,
+      totalRevenue: Number(c.totalRevenue.toFixed(2)),
+      uniqueItemsCount: c.itemsCount.size
+    })).sort((a, b) => b.totalQuantity - a.totalQuantity);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        periodLabel,
+        summary: {
+          totalFoodQuantitySold: totalFoodQtyAll,
+          totalFoodRevenue: Number(totalFoodRevAll.toFixed(2)),
+          totalLiquorQuantitySold: totalLiquorQtyAll,
+          totalLiquorRevenue: Number(totalLiquorRevAll.toFixed(2)),
+          totalCombinedQuantity: totalCombinedQty,
+          totalCombinedRevenue: Number(totalCombinedRev.toFixed(2)),
+          uniqueFoodItemsCount: foodOnly.length,
+          totalBillsAnalyzed: bills.length,
+          topFoodDish,
+          topFoodRevenueDish
+        },
+        items: rankedItems,
+        categories: categoriesArray
+      }
+    });
+  } catch (error) {
+    console.error('Error getting most ordered items:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // @desc    Sync active bill with latest order items
 // @route   POST /api/v1/billing/:id/sync
 // @access  Private
