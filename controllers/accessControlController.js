@@ -46,7 +46,8 @@ const SYSTEM_MODULES = [
       { id: 'revenue_overview', name: 'Revenue Overview', key: '/billing/dashboard' },
       { id: 'invoices_directory', name: 'Invoices Directory', key: '/billing/invoices' },
       { id: 'daily_sales_report', name: 'Daily Sales Report', key: '/billing/daily-sales-report' },
-      { id: 'liquor_sales_report', name: 'Liquor Sales Report', key: '/billing/liquor-sales' }
+      { id: 'liquor_sales_report', name: 'Liquor Sales Report', key: '/billing/liquor-sales' },
+      { id: 'most_ordered_items', name: 'Most Ordered Items', key: '/billing/most-ordered-items' }
     ]
   },
   {
