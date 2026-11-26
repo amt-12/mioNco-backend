@@ -4501,10 +4501,15 @@ exports.getMostOrderedItems = async (req, res) => {
     const categoryMap = {};
     let totalFoodQtyAll = 0;
     let totalFoodRevAll = 0;
+    let totalBeverageQtyAll = 0;
+    let totalBeverageRevAll = 0;
     let totalLiquorQtyAll = 0;
     let totalLiquorRevAll = 0;
     let totalCombinedQty = 0;
     let totalCombinedRev = 0;
+
+    const BEVERAGE_SECTION_REGEX = /\b(beverage|beverages|mocktail|mocktails|shake|shakes|smoothie|smoothies|coffee|tea|chai|juice|juices|soft drink|soft drinks|aerated|soda|cooler|coolers|iced tea|cold coffee|hot beverage|cold beverage|non-alcoholic|drinks|water)\b/i;
+    const BEVERAGE_NAME_REGEX = /\b(mocktail|virgin mojito|milkshake|shake|smoothie|cappuccino|espresso|americano|latte|macchiato|mocha|frappe|cold coffee|iced coffee|iced tea|green tea|masala chai|chai|tea|coffee|fresh lime|nimbu pani|lemonade|coke|pepsi|sprite|fanta|thums up|limca|ginger ale|tonic water|red bull|energy drink|mineral water|packaged water|bisleri|evian|perrier|soda|lassi|buttermilk|chaas|aerated|juice)\b/i;
 
     bills.forEach(bill => {
       const isNCBill = bill.isNonChargeableBill || bill.isComplimentaryBill || bill.paymentStatus === 'Non-Chargeable';
@@ -4512,15 +4517,25 @@ exports.getMostOrderedItems = async (req, res) => {
       (bill.items || []).forEach(item => {
         if (item.isSpoiled) return;
 
-        const rawType = String(item.itemType || '').trim().toLowerCase();
-        const isLiquor = rawType === 'liquor' || isLiquorItem(item);
-        const resolvedType = isLiquor ? 'Liquor' : 'Food';
-
         const menuDoc = (item.menuItem && menuItemMap.get(String(item.menuItem))) || 
                         menuItemMap.get(String(item.foodName || '').trim().toLowerCase());
 
+        const rawType = String(item.itemType || '').trim().toLowerCase();
+        const isLiquor = rawType === 'liquor' || isLiquorItem(item);
+
         const foodName = (item.foodName || menuDoc?.foodName || 'Unnamed Item').trim();
         const sectionName = item.sectionName || menuDoc?.section?.name || menuDoc?.dishType || (isLiquor ? 'Liquor' : 'Main Menu');
+
+        const isBeverage = !isLiquor && (
+          rawType === 'beverage' ||
+          menuDoc?.kitchenStation === 'Beverage' ||
+          BEVERAGE_SECTION_REGEX.test(sectionName) ||
+          BEVERAGE_SECTION_REGEX.test(menuDoc?.dishType || '') ||
+          BEVERAGE_NAME_REGEX.test(foodName)
+        );
+
+        const resolvedType = isLiquor ? 'Liquor' : (isBeverage ? 'Beverage' : 'Food');
+
         const qty = Number(item.quantity) || 1;
         const unitPrice = Number(item.unitPrice) || (Number(item.totalPrice) / (qty || 1)) || 0;
         const totalPrice = Number(item.totalPrice) > 0 ? Number(item.totalPrice) : (unitPrice * qty);
@@ -4528,6 +4543,9 @@ exports.getMostOrderedItems = async (req, res) => {
         if (resolvedType === 'Food') {
           totalFoodQtyAll += qty;
           totalFoodRevAll += totalPrice;
+        } else if (resolvedType === 'Beverage') {
+          totalBeverageQtyAll += qty;
+          totalBeverageRevAll += totalPrice;
         } else {
           totalLiquorQtyAll += qty;
           totalLiquorRevAll += totalPrice;
@@ -4587,8 +4605,8 @@ exports.getMostOrderedItems = async (req, res) => {
         ? item.priceSamples.reduce((a, b) => a + b, 0) / item.priceSamples.length 
         : item.unitPrice;
 
-      const typeQtyTotal = item.itemType === 'Food' ? totalFoodQtyAll : totalLiquorQtyAll;
-      const typeRevTotal = item.itemType === 'Food' ? totalFoodRevAll : totalLiquorRevAll;
+      const typeQtyTotal = item.itemType === 'Food' ? totalFoodQtyAll : (item.itemType === 'Beverage' ? totalBeverageQtyAll : totalLiquorQtyAll);
+      const typeRevTotal = item.itemType === 'Food' ? totalFoodRevAll : (item.itemType === 'Beverage' ? totalBeverageRevAll : totalLiquorRevAll);
 
       return {
         id: item.id,
@@ -4657,6 +4675,40 @@ exports.getMostOrderedItems = async (req, res) => {
       sectionName: foodByRevenue[0].sectionName
     } : null;
 
+    const beverageOnly = Object.values(itemMap).filter(i => i.itemType === 'Beverage');
+    beverageOnly.sort((a, b) => b.totalQuantity - a.totalQuantity);
+    const topBeverageDish = beverageOnly[0] ? {
+      name: beverageOnly[0].foodName,
+      quantity: beverageOnly[0].totalQuantity,
+      revenue: Number(beverageOnly[0].totalRevenue.toFixed(2)),
+      sectionName: beverageOnly[0].sectionName
+    } : null;
+
+    const beverageByRevenue = [...beverageOnly].sort((a, b) => b.totalRevenue - a.totalRevenue);
+    const topBeverageRevenueDish = beverageByRevenue[0] ? {
+      name: beverageByRevenue[0].foodName,
+      quantity: beverageByRevenue[0].totalQuantity,
+      revenue: Number(beverageByRevenue[0].totalRevenue.toFixed(2)),
+      sectionName: beverageByRevenue[0].sectionName
+    } : null;
+
+    const liquorOnly = Object.values(itemMap).filter(i => i.itemType === 'Liquor');
+    liquorOnly.sort((a, b) => b.totalQuantity - a.totalQuantity);
+    const topLiquorDish = liquorOnly[0] ? {
+      name: liquorOnly[0].foodName,
+      quantity: liquorOnly[0].totalQuantity,
+      revenue: Number(liquorOnly[0].totalRevenue.toFixed(2)),
+      sectionName: liquorOnly[0].sectionName
+    } : null;
+
+    const liquorByRevenue = [...liquorOnly].sort((a, b) => b.totalRevenue - a.totalRevenue);
+    const topLiquorRevenueDish = liquorByRevenue[0] ? {
+      name: liquorByRevenue[0].foodName,
+      quantity: liquorByRevenue[0].totalQuantity,
+      revenue: Number(liquorByRevenue[0].totalRevenue.toFixed(2)),
+      sectionName: liquorByRevenue[0].sectionName
+    } : null;
+
     // Categories array
     const categoriesArray = Object.values(categoryMap).map(c => ({
       sectionName: c.sectionName,
@@ -4673,14 +4725,23 @@ exports.getMostOrderedItems = async (req, res) => {
         summary: {
           totalFoodQuantitySold: totalFoodQtyAll,
           totalFoodRevenue: Number(totalFoodRevAll.toFixed(2)),
+          totalBeverageQuantitySold: totalBeverageQtyAll,
+          totalBeverageRevenue: Number(totalBeverageRevAll.toFixed(2)),
           totalLiquorQuantitySold: totalLiquorQtyAll,
           totalLiquorRevenue: Number(totalLiquorRevAll.toFixed(2)),
           totalCombinedQuantity: totalCombinedQty,
           totalCombinedRevenue: Number(totalCombinedRev.toFixed(2)),
           uniqueFoodItemsCount: foodOnly.length,
+          uniqueBeverageItemsCount: beverageOnly.length,
+          uniqueLiquorItemsCount: liquorOnly.length,
+          uniqueTotalItemsCount: Object.keys(itemMap).length,
           totalBillsAnalyzed: bills.length,
           topFoodDish,
-          topFoodRevenueDish
+          topFoodRevenueDish,
+          topBeverageDish,
+          topBeverageRevenueDish,
+          topLiquorDish,
+          topLiquorRevenueDish
         },
         items: rankedItems,
         categories: categoriesArray
